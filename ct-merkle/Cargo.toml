@@ -1,0 +1,44 @@
+[package]
+name = "ct-merkle"
+repository = "https://github.com/rozbb/ct-merkle"
+documentation = "https://docs.rs/ct-merkle"
+description = "An implementation of the append-only log described in the Certificate Transparency specification (RFC 6962)"
+readme = "README.md"
+version = "0.2.0"
+edition = "2021"
+license = "MIT/Apache-2.0"
+keywords = ["crypto", "tls", "pki", "ct", "hash"]
+categories = ["no-std", "cryptography", "network-programming", "compression"]
+
+[dependencies]
+digest = "0.10"
+generic-array = "0.14"
+serde = { version = "1", optional = true, features = ["derive"] }
+subtle = { version = "2", default-features = false }
+
+# SlateDB storage dependencies
+slatedb = { git = "https://github.com/slatedb/slatedb.git", rev = "207715315477d3f73715925fd9599e3667dc7bad", optional = true }
+bincode = { version = "1.3", optional = true }
+tokio = { version = "1", features = ["rt", "macros"], optional = true }
+sha2 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
+
+[features]
+default = []
+std = ["digest/std"]
+serde = ["dep:serde", "generic-array/serde"]
+slatedb = [
+    "dep:slatedb",
+    "dep:bincode",
+    "dep:tokio",
+    "dep:sha2",
+    "dep:hex",
+    "std",
+    "serde",
+]
+
+[dev-dependencies]
+hex = "0.4"
+rand = { version = "0.9", features = ["std_rng"] }
+serde_json = "1"
+sha2 = "0.10"
