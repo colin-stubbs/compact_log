@@ -4,7 +4,7 @@ use p256::pkcs8::LineEnding;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use p256::SecretKey;
 use serde::{Deserialize, Serialize};
-use slatedb::config::CompressionCodec;
+use slatedb::config::{CompressionCodec, ObjectStoreCacheOptions};
 use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
 use slatedb::{
     object_store::{
@@ -13,9 +13,9 @@ use slatedb::{
     },
     Db, Settings,
 };
-use std::fs;
-use std::path::Path as StdPath;
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
+use std::{default, fs};
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -64,6 +64,7 @@ struct AppConfig {
     storage: StorageConfig,
     keys: KeysConfig,
     validation: Option<ValidationConfig>,
+    cache: Option<CacheConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -77,6 +78,12 @@ struct KeysConfig {
     public_key_path: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct CacheConfig {
+    root_folder: String,
+    max_cache_size_gb: u64,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
@@ -87,7 +94,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bind_addr = &config.server.bind_addr;
 
-    let (storage, db_path, object_store) = initialize_storage(&config.storage).await?;
+    let (storage, db_path, object_store) =
+        initialize_storage(&config.storage, &config.cache).await?;
 
     // Load keys from config
     let private_key = load_private_key(&config.keys.private_key_path)?;
@@ -190,6 +198,7 @@ async fn initialize_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
             public_key_path: "keys/public_key.pem".to_string(),
         },
         validation: None,
+        cache: None,
     };
 
     fs::create_dir_all("keys")?;
@@ -243,6 +252,7 @@ fn load_private_key(path: &str) -> Result<SecretKey, Box<dyn std::error::Error>>
 
 async fn initialize_storage(
     storage_config: &StorageConfig,
+    cache_config: &Option<CacheConfig>,
 ) -> Result<(Arc<Db>, Path, Arc<dyn ObjectStore>), Box<dyn std::error::Error>> {
     let cache_options = MokaCacheOptions::default();
 
@@ -250,6 +260,15 @@ async fn initialize_storage(
 
     let mut db_options = Settings::default();
     db_options.compression_codec = Some(CompressionCodec::Zstd);
+
+    db_options.object_store_cache_options = match cache_config {
+        Some(cache) => ObjectStoreCacheOptions {
+            root_folder: Some(PathBuf::from(&cache.root_folder)),
+            max_cache_size_bytes: Some((cache.max_cache_size_gb * 1024 * 1024 * 1024) as usize),
+            ..default::Default::default()
+        },
+        None => ObjectStoreCacheOptions::default(),
+    };
 
     let path = Path::from("ct_log");
     let blob_store: Arc<dyn ObjectStore> = match storage_config.provider.as_str() {
