@@ -5,7 +5,6 @@ use axum::{
 };
 use serde::Serialize;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::{
     merkle_storage::StorageBackedMerkleTree,
@@ -18,7 +17,7 @@ pub mod handlers;
 
 pub struct ApiState {
     pub storage: Arc<CtStorage>,
-    pub merkle_tree: Arc<RwLock<StorageBackedMerkleTree>>,
+    pub merkle_tree: StorageBackedMerkleTree,
     pub sct_builder: Arc<SctBuilder>,
     pub sth_builder: Arc<SthBuilder>,
     pub validator: Option<Arc<CertificateValidator>>,
@@ -29,7 +28,7 @@ pub struct ApiState {
 impl ApiState {
     pub fn new(
         storage: Arc<CtStorage>,
-        merkle_tree: Arc<RwLock<StorageBackedMerkleTree>>,
+        merkle_tree: StorageBackedMerkleTree,
         log_id: LogId,
         private_key: Vec<u8>,
         validator: Option<Arc<CertificateValidator>>,

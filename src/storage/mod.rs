@@ -102,7 +102,7 @@ impl CtStorage {
     pub async fn new(
         db: Arc<Db>,
         config: BatchConfig,
-        merkle_tree: Arc<tokio::sync::RwLock<StorageBackedMerkleTree>>,
+        merkle_tree: StorageBackedMerkleTree,
         db_path: slatedb::object_store::path::Path,
         object_store: Arc<dyn slatedb::object_store::ObjectStore>,
     ) -> Result<Self> {
@@ -185,7 +185,7 @@ impl CtStorage {
         mut batch_receiver: mpsc::UnboundedReceiver<BatchEntry>,
         config: BatchConfig,
         batch_mutex: Arc<Mutex<()>>,
-        merkle_tree: Arc<tokio::sync::RwLock<StorageBackedMerkleTree>>,
+        merkle_tree: StorageBackedMerkleTree,
     ) {
         tracing::info!("batch_worker: Starting background worker");
         let mut pending_entries = Vec::with_capacity(config.max_batch_size);
@@ -241,7 +241,7 @@ impl CtStorage {
     async fn flush_batch(
         entries: &mut Vec<BatchEntry>,
         batch_mutex: Arc<Mutex<()>>,
-        merkle_tree: Arc<tokio::sync::RwLock<StorageBackedMerkleTree>>,
+        merkle_tree: StorageBackedMerkleTree,
     ) {
         if entries.is_empty() {
             tracing::trace!("flush_batch: No entries to flush");
@@ -280,12 +280,10 @@ impl CtStorage {
             );
 
             // Build the additional data that needs to be written atomically with the tree
-            let tree = merkle_tree.read().await;
             let starting_index =
-                match tree.size().await {
+                match merkle_tree.size().await {
                     Ok(size) => size,
                     Err(e) => {
-                        drop(tree);
                         tracing::error!("Failed to get tree size: {:?}", e);
                         for entry in entries.drain(..) {
                             let _ = entry.completion_tx.send(Err(StorageError::InvalidFormat(
@@ -295,7 +293,6 @@ impl CtStorage {
                         return;
                     }
                 };
-            drop(tree);
 
             // Prepare all additional data with correct indices
             let mut additional_data = Vec::new();
@@ -339,8 +336,7 @@ impl CtStorage {
                 additional_data.push((cert_sct_key.into_bytes(), sct_data));
             }
 
-            let tree = merkle_tree.read().await;
-            match tree
+            match merkle_tree
                 .batch_push_with_data(leaf_data_vec, additional_data)
                 .await
             {

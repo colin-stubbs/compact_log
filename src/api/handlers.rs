@@ -643,8 +643,7 @@ pub async fn get_entry_and_proof(
     Query(params): Query<GetEntryAndProofRequest>,
 ) -> ApiResult<GetEntryAndProofResponse> {
     let tree_size = params.tree_size.unwrap_or({
-        let tree = state.merkle_tree.read().await;
-        tree.size()
+        state.merkle_tree.size()
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?
     });

@@ -109,11 +109,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Creating merkle tree...");
     info!("DB initialized, attempting to create StorageBackedMerkleTree");
 
-    let merkle_tree_instance =
+    let merkle_tree =
         merkle_storage::StorageBackedMerkleTree::new(storage.clone()).await?;
     info!("StorageBackedMerkleTree created successfully");
-
-    let merkle_tree = Arc::new(tokio::sync::RwLock::new(merkle_tree_instance));
 
     info!("Merkle tree created");
 

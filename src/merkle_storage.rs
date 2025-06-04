@@ -37,8 +37,9 @@ impl<'de> serde::Deserialize<'de> for Certificate {
 }
 
 /// Storage-backed Merkle tree using ct-merkle's SlateDbBackedTree
+#[derive(Clone)]
 pub struct StorageBackedMerkleTree {
-    tree: tokio::sync::RwLock<SlateDbBackedTree<Sha256, Certificate>>,
+    tree: Arc<tokio::sync::RwLock<SlateDbBackedTree<Sha256, Certificate>>>,
 }
 
 impl StorageBackedMerkleTree {
@@ -51,7 +52,7 @@ impl StorageBackedMerkleTree {
         })?;
 
         Ok(Self {
-            tree: tokio::sync::RwLock::new(tree),
+            tree: Arc::new(tokio::sync::RwLock::new(tree)),
         })
     }
 
@@ -84,7 +85,7 @@ impl StorageBackedMerkleTree {
         })?;
 
         Ok(Self {
-            tree: tokio::sync::RwLock::new(tree),
+            tree: Arc::new(tokio::sync::RwLock::new(tree)),
         })
     }
 
