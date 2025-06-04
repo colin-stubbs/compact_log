@@ -127,29 +127,27 @@ where
     }
 
     /// Appends multiple items to the tree in a single atomic batch operation.
-    pub async fn batch_push(&mut self, items: Vec<T>) -> Result<(), SlateDbTreeError> {
+    /// Returns the starting index of the newly added items.
+    pub async fn batch_push(&mut self, items: Vec<T>) -> Result<u64, SlateDbTreeError> {
         self.batch_push_with_data(items, alloc::vec![]).await
     }
 
     /// Appends multiple items to the tree along with additional key-value pairs in a single atomic batch.
     /// This ensures consistency between the merkle tree and any associated data.
+    /// Returns the starting index of the newly added items.
     pub async fn batch_push_with_data(
         &mut self,
         items: Vec<T>,
         additional_data: Vec<(Vec<u8>, Vec<u8>)>,
-    ) -> Result<(), SlateDbTreeError> {
+    ) -> Result<u64, SlateDbTreeError> {
+        let starting_index = self.len().await?;
+
         if items.is_empty() && additional_data.is_empty() {
-            return Ok(());
+            return Ok(starting_index);
         }
 
         let mut batch = WriteBatch::new();
-        let mut current_num_leaves = self.len().await?;
-
-        if current_num_leaves + items.len() as u64 >= u64::MAX / 2 {
-            return Err(SlateDbTreeError::InconsistentState(
-                "Tree would be too large".into(),
-            ));
-        }
+        let mut current_num_leaves = starting_index;
 
         let mut computed_hashes = alloc::collections::BTreeMap::<u64, digest::Output<H>>::new();
 
@@ -219,7 +217,7 @@ where
 
         self.db.write(batch).await?;
 
-        Ok(())
+        Ok(starting_index)
     }
 
     /// Appends the given item to the end of the list.

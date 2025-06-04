@@ -69,7 +69,7 @@ impl StorageBackedMerkleTree {
         &self,
         cert_data_vec: Vec<Vec<u8>>,
         additional_data: Vec<(Vec<u8>, Vec<u8>)>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let mut tree = self.tree.write().await;
         let certificates: Vec<Certificate> = cert_data_vec
             .into_iter()

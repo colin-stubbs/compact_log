@@ -3,7 +3,7 @@ use crate::types::{sct::SignedCertificateTimestamp, LogEntry};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use slatedb::Db;
-use std::sync::{atomic::AtomicU64, atomic::Ordering, Arc};
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -38,11 +38,10 @@ pub type Result<T> = std::result::Result<T, StorageError>;
 /// Entry to be batched and flushed
 #[derive(Debug)]
 pub struct BatchEntry {
-    pub index: u64,
     pub log_entry: LogEntry,
     pub cert_hash: [u8; 32],
     pub sct: SignedCertificateTimestamp,
-    pub completion_tx: oneshot::Sender<Result<()>>,
+    pub completion_tx: oneshot::Sender<Result<u64>>,
 }
 
 /// Certificate SCT mapping entry for deduplication
@@ -77,7 +76,6 @@ impl KeyPrefix {
 /// Storage backend for Certificate Transparency log using SlateDB with batching
 pub struct CtStorage {
     pub(crate) db: Arc<Db>,
-    next_index: Arc<AtomicU64>,
     batch_sender: mpsc::UnboundedSender<BatchEntry>,
 }
 
@@ -96,13 +94,6 @@ impl CtStorage {
         config: BatchConfig,
         merkle_tree: Arc<tokio::sync::RwLock<StorageBackedMerkleTree>>,
     ) -> Result<Self> {
-        let tree = merkle_tree.read().await;
-        let initial_tree_size = tree.size().await.map_err(|e| {
-            StorageError::InvalidFormat(format!("Failed to get tree size: {:?}", e))
-        })?;
-        drop(tree);
-
-        let next_index = Arc::new(AtomicU64::new(initial_tree_size));
         let (batch_sender, batch_receiver) = mpsc::unbounded_channel();
         let batch_mutex = Arc::new(Mutex::new(()));
 
@@ -112,11 +103,7 @@ impl CtStorage {
             Self::batch_worker(batch_receiver, config, mutex_clone, tree_clone).await;
         });
 
-        Ok(Self {
-            db,
-            next_index,
-            batch_sender,
-        })
+        Ok(Self { db, batch_sender })
     }
 
     /// Add entry to batch queue and return assigned index
@@ -128,14 +115,9 @@ impl CtStorage {
     ) -> Result<u64> {
         tracing::debug!("add_entry_batched: Starting");
 
-        let index = self.next_index.fetch_add(1, Ordering::SeqCst);
-
-        tracing::debug!("add_entry_batched: Assigned index {}", index);
-
         let (completion_tx, completion_rx) = oneshot::channel();
 
         let batch_entry = BatchEntry {
-            index,
             log_entry,
             cert_hash,
             sct,
@@ -151,13 +133,24 @@ impl CtStorage {
 
         tracing::debug!("add_entry_batched: Sent to batch worker, waiting for completion");
 
-        let result = completion_rx.await.map_err(|_| {
+        let index = completion_rx.await.map_err(|_| {
             tracing::error!("add_entry_batched: Completion channel closed");
             StorageError::InvalidFormat("Batch completion channel closed".into())
         })?;
 
-        tracing::debug!("add_entry_batched: Received completion result");
-        result.map(|_| index)
+        match index {
+            Ok(idx) => {
+                tracing::debug!(
+                    "add_entry_batched: Received completion result with index {}",
+                    idx
+                );
+                Ok(idx)
+            }
+            Err(e) => {
+                tracing::debug!("add_entry_batched: Received completion error");
+                Err(e)
+            }
+        }
     }
 
     /// Background worker that batches and flushes entries
@@ -178,7 +171,7 @@ impl CtStorage {
                     match entry {
                         Some(entry) => {
                             let was_empty = pending_entries.is_empty();
-                            tracing::debug!("batch_worker: Received entry with index {}", entry.index);
+                            tracing::debug!("batch_worker: Received entry");
                             pending_entries.push(entry);
 
                             // If this is the first entry in the batch, reset the timeout
@@ -188,7 +181,7 @@ impl CtStorage {
 
                             if pending_entries.len() >= config.max_batch_size {
                                 tracing::debug!("batch_worker: Batch full, flushing {} entries", pending_entries.len());
-                                Self::flush_batch(&mut pending_entries, &batch_mutex, &merkle_tree).await;
+                                Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone()).await;
                                 // Reset timeout for next batch
                                 timeout.as_mut().reset(tokio::time::Instant::now() + timeout_duration);
                             }
@@ -196,7 +189,7 @@ impl CtStorage {
                         None => {
                             if !pending_entries.is_empty() {
                                 tracing::debug!("batch_worker: Channel closed, flushing {} remaining entries", pending_entries.len());
-                                Self::flush_batch(&mut pending_entries, &batch_mutex, &merkle_tree).await;
+                                Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone()).await;
                             }
                             tracing::info!("batch_worker: Exiting");
                             break;
@@ -208,7 +201,7 @@ impl CtStorage {
                 _ = &mut timeout => {
                     if !pending_entries.is_empty() {
                         tracing::debug!("batch_worker: Timeout reached, flushing {} entries", pending_entries.len());
-                        Self::flush_batch(&mut pending_entries, &batch_mutex, &merkle_tree).await;
+                        Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone()).await;
                     }
                     // Reset timeout for next batch
                     timeout.as_mut().reset(tokio::time::Instant::now() + timeout_duration);
@@ -220,8 +213,8 @@ impl CtStorage {
     /// Flush a batch of entries atomically
     async fn flush_batch(
         entries: &mut Vec<BatchEntry>,
-        batch_mutex: &Arc<Mutex<()>>,
-        merkle_tree: &Arc<tokio::sync::RwLock<StorageBackedMerkleTree>>,
+        batch_mutex: Arc<Mutex<()>>,
+        merkle_tree: Arc<tokio::sync::RwLock<StorageBackedMerkleTree>>,
     ) {
         if entries.is_empty() {
             tracing::debug!("flush_batch: No entries to flush");
@@ -232,91 +225,156 @@ impl CtStorage {
 
         tracing::debug!("flush_batch: Flushing {} entries", entries.len());
 
-        let mut additional_data = Vec::new();
         let mut leaf_data_vec = Vec::new();
+        let mut entry_metadata = Vec::new();
         let mut failed_entries = Vec::new();
 
         for (i, entry) in entries.iter().enumerate() {
-            let entry_key = format!("{}:{}", KeyPrefix::ENTRY, entry.index);
-            let entry_data = match entry.log_entry.serialize_for_storage() {
-                Ok(data) => data,
-                Err(e) => {
-                    failed_entries.push((i, Err(StorageError::InvalidFormat(e.to_string()))));
-                    continue;
+            match entry.log_entry.serialize_for_storage() {
+                Ok(entry_data) => {
+                    entry_metadata.push((
+                        i,
+                        entry_data,
+                        entry.cert_hash.clone(),
+                        entry.sct.clone(),
+                    ));
+                    leaf_data_vec.push(entry.log_entry.leaf_data.clone());
                 }
-            };
-
-            // For get-proof-by-hash API, we need to store hash->index mapping
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(&[0x00]); // Leaf prefix
-            hasher.update(&entry.log_entry.leaf_data);
-            let computed_leaf_hash: [u8; 32] = hasher.finalize().into();
-
-            let hash_key = format!(
-                "{}:{}",
-                KeyPrefix::HASH_INDEX,
-                hex::encode(&computed_leaf_hash)
-            );
-
-            let cert_sct_key = format!("{}:{}", KeyPrefix::CERT_SCT, hex::encode(&entry.cert_hash));
-            let sct_entry = CertificateSctEntry {
-                index: entry.index,
-                sct: entry.sct.clone(),
-                timestamp: entry.sct.timestamp,
-            };
-            let sct_data =
-                match bincode::serde::encode_to_vec(&sct_entry, bincode::config::standard()) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        failed_entries.push((
-                            i,
-                            Err(StorageError::InvalidFormat(format!(
-                                "Failed to serialize SCT entry: {}",
-                                e
-                            ))),
-                        ));
-                        continue;
-                    }
-                };
-
-            additional_data.push((entry_key.into_bytes(), entry_data));
-            additional_data.push((hash_key.into_bytes(), entry.index.to_be_bytes().to_vec()));
-            additional_data.push((cert_sct_key.into_bytes(), sct_data));
-
-            leaf_data_vec.push(entry.log_entry.leaf_data.clone());
+                Err(e) => {
+                    failed_entries.push((i, StorageError::InvalidFormat(e.to_string())));
+                }
+            }
         }
 
-        let final_result = if !leaf_data_vec.is_empty() || !additional_data.is_empty() {
+        let push_result = if !leaf_data_vec.is_empty() {
             tracing::debug!(
-                "flush_batch: Pushing {} entries with {} additional writes to merkle tree",
-                leaf_data_vec.len(),
-                additional_data.len()
+                "flush_batch: Pushing {} entries to merkle tree",
+                leaf_data_vec.len()
             );
+
+            // Build the additional data that needs to be written atomically with the tree
             let tree = merkle_tree.read().await;
-            tree.batch_push_with_data(leaf_data_vec, additional_data)
+            let starting_index =
+                match tree.size().await {
+                    Ok(size) => size,
+                    Err(e) => {
+                        drop(tree);
+                        tracing::error!("Failed to get tree size: {:?}", e);
+                        for entry in entries.drain(..) {
+                            let _ = entry.completion_tx.send(Err(StorageError::InvalidFormat(
+                                format!("Failed to get tree size: {:?}", e),
+                            )));
+                        }
+                        return;
+                    }
+                };
+            drop(tree);
+
+            // Prepare all additional data with correct indices
+            let mut additional_data = Vec::new();
+            for (vec_idx, (_orig_idx, entry_data, cert_hash, sct)) in
+                entry_metadata.iter().enumerate()
+            {
+                let index = starting_index + vec_idx as u64;
+
+                let entry_key = format!("{}:{}", KeyPrefix::ENTRY, index);
+
+                // For get-proof-by-hash API, we need to store hash->index mapping
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(&[0x00]); // Leaf prefix
+                hasher.update(&leaf_data_vec[vec_idx]);
+                let computed_leaf_hash: [u8; 32] = hasher.finalize().into();
+
+                let hash_key = format!(
+                    "{}:{}",
+                    KeyPrefix::HASH_INDEX,
+                    hex::encode(&computed_leaf_hash)
+                );
+
+                let cert_sct_key = format!("{}:{}", KeyPrefix::CERT_SCT, hex::encode(cert_hash));
+                let sct_entry = CertificateSctEntry {
+                    index,
+                    sct: sct.clone(),
+                    timestamp: sct.timestamp,
+                };
+                let sct_data =
+                    match bincode::serde::encode_to_vec(&sct_entry, bincode::config::standard()) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            tracing::error!("Failed to serialize SCT entry: {}", e);
+                            continue;
+                        }
+                    };
+
+                additional_data.push((entry_key.into_bytes(), entry_data.clone()));
+                additional_data.push((hash_key.into_bytes(), index.to_be_bytes().to_vec()));
+                additional_data.push((cert_sct_key.into_bytes(), sct_data));
+            }
+
+            let tree = merkle_tree.read().await;
+            match tree
+                .batch_push_with_data(leaf_data_vec, additional_data)
                 .await
-                .map_err(|e| StorageError::InvalidFormat(format!("Merkle tree error: {:?}", e)))
+            {
+                Ok(actual_starting_index) => {
+                    // Sanity check
+                    if actual_starting_index != starting_index {
+                        tracing::error!(
+                            "Index mismatch: expected {}, got {}",
+                            starting_index,
+                            actual_starting_index
+                        );
+                    }
+                    Ok(actual_starting_index)
+                }
+                Err(e) => Err(StorageError::InvalidFormat(format!(
+                    "Merkle tree error: {:?}",
+                    e
+                ))),
+            }
         } else {
-            Ok(())
+            Err(StorageError::InvalidFormat(
+                "No valid entries to flush".into(),
+            ))
         };
 
         tracing::debug!(
             "flush_batch: Completed with result: {:?}",
-            final_result.is_ok()
+            push_result.is_ok()
         );
 
-        // Notify all entries in batch
-        for (i, entry) in entries.drain(..).enumerate() {
-            if let Some((_, error)) = failed_entries.iter().find(|(idx, _)| *idx == i) {
-                tracing::info!(
-                    "flush_batch: Notifying entry {} with serialization error",
-                    i
-                );
-                let _ = entry.completion_tx.send(error.clone());
-            } else {
-                tracing::debug!("flush_batch: Notifying entry {} with final result", i);
-                let _ = entry.completion_tx.send(final_result.clone());
+        // Notify all entries with their results
+        match push_result {
+            Ok(starting_index) => {
+                let mut valid_idx = 0;
+                for (i, entry) in entries.drain(..).enumerate() {
+                    if let Some((_, error)) = failed_entries.iter().find(|(idx, _)| *idx == i) {
+                        tracing::info!(
+                            "flush_batch: Notifying entry {} with serialization error",
+                            i
+                        );
+                        let _ = entry.completion_tx.send(Err(error.clone()));
+                    } else {
+                        let assigned_index = starting_index + valid_idx;
+                        valid_idx += 1;
+                        tracing::debug!(
+                            "flush_batch: Notifying entry {} with assigned index {}",
+                            i,
+                            assigned_index
+                        );
+                        let _ = entry.completion_tx.send(Ok(assigned_index));
+                    }
+                }
+            }
+            Err(e) => {
+                for (i, entry) in entries.drain(..).enumerate() {
+                    if let Some((_, error)) = failed_entries.iter().find(|(idx, _)| *idx == i) {
+                        let _ = entry.completion_tx.send(Err(error.clone()));
+                    } else {
+                        let _ = entry.completion_tx.send(Err(e.clone()));
+                    }
+                }
             }
         }
 
