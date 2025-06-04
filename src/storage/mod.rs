@@ -535,7 +535,7 @@ impl CtStorage {
                         prev_timestamp
                     };
 
-                    tracing::info!(
+                    tracing::debug!(
                         "Created checkpoint: ID = {}, Tree size = {} (prev = {}), Timestamp = {} ({})",
                         result.id,
                         new_tree_size,
