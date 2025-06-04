@@ -169,18 +169,28 @@ impl CtStorage {
     ) {
         tracing::info!("batch_worker: Starting background worker");
         let mut pending_entries = Vec::with_capacity(config.max_batch_size);
+        let timeout_duration = std::time::Duration::from_millis(config.max_batch_timeout_ms);
+        let mut timeout = Box::pin(tokio::time::sleep(timeout_duration));
 
         loop {
             tokio::select! {
                 entry = batch_receiver.recv() => {
                     match entry {
                         Some(entry) => {
+                            let was_empty = pending_entries.is_empty();
                             tracing::debug!("batch_worker: Received entry with index {}", entry.index);
                             pending_entries.push(entry);
+
+                            // If this is the first entry in the batch, reset the timeout
+                            if was_empty {
+                                timeout.as_mut().reset(tokio::time::Instant::now() + timeout_duration);
+                            }
 
                             if pending_entries.len() >= config.max_batch_size {
                                 tracing::debug!("batch_worker: Batch full, flushing {} entries", pending_entries.len());
                                 Self::flush_batch(&mut pending_entries, &batch_mutex, &merkle_tree).await;
+                                // Reset timeout for next batch
+                                timeout.as_mut().reset(tokio::time::Instant::now() + timeout_duration);
                             }
                         }
                         None => {
@@ -194,10 +204,14 @@ impl CtStorage {
                     }
                 }
 
-                // Timeout: flush pending entries (only if we have entries)
-                _ = tokio::time::sleep(std::time::Duration::from_millis(config.max_batch_timeout_ms)), if !pending_entries.is_empty() => {
-                    tracing::debug!("batch_worker: Timeout reached, flushing {} entries", pending_entries.len());
-                    Self::flush_batch(&mut pending_entries, &batch_mutex, &merkle_tree).await;
+                // Timeout: flush pending entries
+                _ = &mut timeout => {
+                    if !pending_entries.is_empty() {
+                        tracing::debug!("batch_worker: Timeout reached, flushing {} entries", pending_entries.len());
+                        Self::flush_batch(&mut pending_entries, &batch_mutex, &merkle_tree).await;
+                    }
+                    // Reset timeout for next batch
+                    timeout.as_mut().reset(tokio::time::Instant::now() + timeout_duration);
                 }
             }
         }
