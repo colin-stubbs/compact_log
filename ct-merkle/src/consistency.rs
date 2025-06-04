@@ -6,6 +6,7 @@ use crate::{
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use std::{eprintln, vec};
 
 use digest::{typenum::Unsigned, Digest};
 use subtle::ConstantTimeEq;
@@ -97,10 +98,6 @@ where
 /// Given a tree size and number of additions, produces a list of tree node indices whose values in
 /// the new tree (i.e., including the additions) are needed to build the consistency proof.
 ///
-/// This is useful when we don't have the entire tree in memory, e.g., when it is stored on disk or
-/// stored in tiles on a remote server. Once the digests are retreived, they can be used in the same
-/// order in [`ConsistencyProof::from_digests`].
-///
 /// # Panics
 /// Panics if `num_oldtree_leaves == 0` or `num_oldtree_leaves + num_additions > ⌊u64::MAX / 2⌋ + 1`.
 pub fn indices_for_consistency_proof(num_oldtree_leaves: u64, num_additions: u64) -> Vec<u64> {
@@ -114,53 +111,82 @@ pub fn indices_for_consistency_proof(num_oldtree_leaves: u64, num_additions: u64
         panic!("too many leaves")
     }
 
-    let mut out = Vec::new();
-
-    // The root_idx() and LeafIdx::new() calls below cannot panic, because `num_newtree_leaves`, and
-    // hence `num_oldtree_leaves` are guaranteed to be within range from the checks above.
     let num_newtree_leaves = num_oldtree_leaves + num_additions;
-    let newtree_root_idx = root_idx(num_newtree_leaves);
-    let oldtree_root_idx = root_idx(num_oldtree_leaves);
 
-    // We have starting_idx in a current tree and a old tree. starting_idx occurs in a subtree
-    // which is both a subtree of the current tree and of the old tree.
-    // We want to find the largest such subtree, and start logging the copath after that.
-
-    // We have a special case when the old tree is a subtree of the current tree. This happens
-    // when the old tree is a complete binary tree OR when the old tree equals this tree (i.e.,
-    // nothing changed between the trees).
-    let oldtree_is_subtree =
-        num_oldtree_leaves.is_power_of_two() || num_oldtree_leaves == num_newtree_leaves;
-
-    // If the old tree is a subtree, then the starting idx for the path is the subtree root
-    let mut path_idx = if oldtree_is_subtree {
-        oldtree_root_idx
-    } else {
-        // If the old tree isn't a subtree, find the first place that the ancestors of the
-        // starting index diverge. This cannot panic because `num_newtree_leaves >
-        // num_oldtree_leaves` from the `oldtree_is_subtree` branch above, and `num_oldtree_leaves
-        // != 0` due to the check at the very beginning.
-        let ancestor_in_tree =
-            first_node_with_diverging_parents(num_newtree_leaves, num_oldtree_leaves);
-        // Record the point just before divergences
-        out.push(ancestor_in_tree.as_u64());
-
-        ancestor_in_tree
-    };
-
-    // Now collect the copath, just like in the inclusion proof
-    while path_idx != newtree_root_idx {
-        // The sibling() and parent() computations cannot panic because 1) the computations above
-        // are guaranteed to set path_idx to a valid index in the new tree (and calling .parent() is
-        // a valid transform), and 2) if we're in this loop, then path_idx is not the root yet.
-        let sibling_idx = path_idx.sibling(num_newtree_leaves);
-        out.push(sibling_idx.as_u64());
-
-        // Go up a level
-        path_idx = path_idx.parent(num_newtree_leaves);
+    if num_oldtree_leaves == num_newtree_leaves {
+        return Vec::new();
     }
 
-    out
+    subproof(num_oldtree_leaves, num_newtree_leaves, true)
+}
+
+/// RFC 6962 SUBPROOF algorithm
+fn subproof(m: u64, n: u64, b: bool) -> Vec<u64> {
+    if m == n {
+        return if b {
+            vec![]
+        } else {
+            vec![root_idx(m).as_u64()]
+        };
+    }
+
+    let k = largest_power_of_two_less_than(n);
+
+    if m <= k {
+        // SUBPROOF(m, D[n], b) = SUBPROOF(m, D[0:k], b) : MTH(D[k:n])
+        let mut result = subproof(m, k, b);
+
+        // Add MTH(D[k:n]) - the root of the right subtree
+        let subtree_root = compute_subtree_root(k, n);
+        result.push(subtree_root.as_u64());
+
+        result
+    } else {
+        // SUBPROOF(m, D[n], b) = SUBPROOF(m - k, D[k:n], false) : MTH(D[0:k])
+        let mut result = subproof(m - k, n - k, false);
+        result.push(root_idx(k).as_u64());
+        result
+    }
+}
+
+/// Compute the root of a subtree containing leaves [start, end)
+fn compute_subtree_root(start: u64, end: u64) -> InternalIdx {
+    let size = end - start;
+
+    if size == 1 {
+        // Single leaf
+        return LeafIdx::new(start).into();
+    }
+
+    // For multiple leaves, recursively compute the root
+    let k = largest_power_of_two_less_than(size);
+
+    let left_root = compute_subtree_root(start, start + k);
+    let right_root = compute_subtree_root(start + k, end);
+
+    // Verify that left and right are siblings, then return their parent
+    // In a properly constructed tree, the sibling of left_root should be right_root
+    debug_assert_eq!(
+        left_root.sibling(end),
+        right_root,
+        "Left and right roots should be siblings"
+    );
+
+    // Return the parent of these two nodes
+    left_root.parent(end)
+}
+
+fn largest_power_of_two_less_than(n: u64) -> u64 {
+    if n <= 1 {
+        panic!("No power of two less than {}", n);
+    }
+
+    // Find the largest power of 2 that is strictly less than n
+    let mut power = 1u64;
+    while power * 2 < n {
+        power *= 2;
+    }
+    power
 }
 
 impl<H: Digest> RootHash<H> {

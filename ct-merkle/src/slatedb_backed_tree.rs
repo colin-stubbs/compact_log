@@ -1,6 +1,7 @@
 use crate::{
-    indices_for_consistency_proof, indices_for_inclusion_proof, tree_util::*, ConsistencyProof,
-    InclusionProof, RootHash,
+    consistency::{indices_for_consistency_proof, ConsistencyProof},
+    indices_for_inclusion_proof, leaf_hash, parent_hash, root_idx, HashableLeaf, InclusionProof,
+    InternalIdx, LeafIdx, RootHash,
 };
 use alloc::{format, string::String, string::ToString, vec::Vec};
 use core::fmt;
@@ -287,6 +288,47 @@ where
         self.db.write(batch).await?;
 
         Ok(())
+    }
+
+    pub async fn prove_consistency_between(
+        &self,
+        old_size: u64,
+        new_size: u64,
+    ) -> Result<ConsistencyProof<H>, SlateDbTreeError> {
+        if old_size == 0 {
+            return Err(SlateDbTreeError::InconsistentState(
+                "Cannot create consistency proof from empty tree".into(),
+            ));
+        }
+
+        if old_size > new_size {
+            return Err(SlateDbTreeError::InconsistentState(format!(
+                "Old size {} must be less than or equal to new size {}",
+                old_size, new_size
+            )));
+        }
+
+        if old_size == new_size {
+            return Ok(ConsistencyProof::from_digests(std::iter::empty()));
+        }
+
+        let current_size = self.len().await?;
+        if new_size > current_size {
+            return Err(SlateDbTreeError::InconsistentState(format!(
+                "New size {} exceeds current tree size {}",
+                new_size, current_size
+            )));
+        }
+
+        let idxs = indices_for_consistency_proof(old_size, new_size - old_size);
+
+        let mut proof_hashes = Vec::with_capacity(idxs.len());
+        for &node_idx in &idxs {
+            let hash = self.get_node_hash(InternalIdx::new(node_idx)).await?;
+            proof_hashes.push(hash);
+        }
+
+        Ok(ConsistencyProof::from_digests(proof_hashes.iter()))
     }
 
     /// Recalculates the hashes on the path from `leaf_idx` to the root.

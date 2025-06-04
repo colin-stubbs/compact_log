@@ -23,7 +23,7 @@ pub mod slatedb_backed_tree;
 #[cfg(test)]
 mod test_util;
 
-pub use consistency::*;
+pub use consistency::ConsistencyProof;
 pub use error::*;
 pub use inclusion::*;
 pub use tree_util::*;

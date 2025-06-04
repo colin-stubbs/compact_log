@@ -77,12 +77,14 @@ impl StorageBackedMerkleTree {
             )))
         })?;
 
-        let tree = SlateDbBackedTree::from_reader(Arc::new(reader)).await.map_err(|e| {
-            CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
-                "Failed to create SlateDbBackedTree from reader: {:?}",
-                e
-            )))
-        })?;
+        let tree = SlateDbBackedTree::from_reader(Arc::new(reader))
+            .await
+            .map_err(|e| {
+                CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
+                    "Failed to create SlateDbBackedTree from reader: {:?}",
+                    e
+                )))
+            })?;
 
         Ok(Self {
             tree: Arc::new(tokio::sync::RwLock::new(tree)),
@@ -197,7 +199,7 @@ impl StorageBackedMerkleTree {
 
         let tree = self.tree.read().await;
         let proof = (*tree)
-            .prove_consistency(old_tree_size)
+            .prove_consistency_between(old_tree_size, new_tree_size)
             .await
             .map_err(|e| {
                 CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
