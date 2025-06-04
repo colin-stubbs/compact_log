@@ -354,6 +354,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "x509-cert",
 ]
 

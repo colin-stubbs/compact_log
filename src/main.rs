@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bind_addr = &config.server.bind_addr;
 
-    let storage = initialize_storage(&config.storage).await?;
+    let (storage, db_path, object_store) = initialize_storage(&config.storage).await?;
 
     // Load keys from config
     let private_key = load_private_key(&config.keys.private_key_path)?;
@@ -101,7 +101,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Creating merkle tree...");
     info!("DB initialized, attempting to create StorageBackedMerkleTree");
 
-    // Create merkle tree using the same DB
     let merkle_tree_instance =
         merkle_storage::StorageBackedMerkleTree::new(storage.clone()).await?;
     info!("StorageBackedMerkleTree created successfully");
@@ -111,8 +110,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Merkle tree created");
 
     info!("Creating CT storage...");
-    // Then create storage with merkle tree reference
-    let ct_storage = CtStorage::new(storage, batch_config, merkle_tree.clone()).await?;
+
+    let ct_storage = CtStorage::new(
+        storage,
+        batch_config,
+        merkle_tree.clone(),
+        db_path.clone(),
+        object_store.clone(),
+    )
+    .await?;
+
     info!("CT storage created");
 
     // Initialize certificate validator if validation is configured
@@ -134,6 +141,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_id,
         private_key_bytes,
         validator,
+        db_path.clone(),
+        object_store.clone(),
     )?;
 
     let app = create_router(api_state);
@@ -234,7 +243,7 @@ fn load_private_key(path: &str) -> Result<SecretKey, Box<dyn std::error::Error>>
 
 async fn initialize_storage(
     storage_config: &StorageConfig,
-) -> Result<Arc<Db>, Box<dyn std::error::Error>> {
+) -> Result<(Arc<Db>, Path, Arc<dyn ObjectStore>), Box<dyn std::error::Error>> {
     let cache_options = MokaCacheOptions {
         max_capacity: 3 * 1024 * 1024 * 1024,
         time_to_live: Some(std::time::Duration::from_secs(60 * 60)),
@@ -294,7 +303,7 @@ async fn initialize_storage(
         .await
         .expect("failed to open db");
 
-    Ok(Arc::new(db))
+    Ok((Arc::new(db), path, blob_store))
 }
 
 fn derive_public_key_der_from_p256(private_key: &SecretKey) -> Vec<u8> {

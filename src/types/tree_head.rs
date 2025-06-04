@@ -96,8 +96,8 @@ impl SthBuilder {
         Ok(Self { signing_key })
     }
 
-    pub fn create_sth(&self, tree_size: u64, root_hash: Vec<u8>) -> Result<SignedTreeHead> {
-        let timestamp = chrono::Utc::now().timestamp_millis() as u64;
+    pub fn create_sth(&self, tree_size: u64, root_hash: Vec<u8>, checkpoint_timestamp: Option<u64>) -> Result<SignedTreeHead> {
+        let timestamp = checkpoint_timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as u64);
         let mut sth = SignedTreeHead::new(tree_size, timestamp, root_hash);
 
         let signature_input = sth.get_signature_input();

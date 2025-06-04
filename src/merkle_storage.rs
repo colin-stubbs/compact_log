@@ -55,6 +55,39 @@ impl StorageBackedMerkleTree {
         })
     }
 
+    pub async fn from_checkpoint(
+        path: slatedb::object_store::path::Path,
+        object_store: Arc<dyn slatedb::object_store::ObjectStore>,
+        checkpoint_id: uuid::Uuid,
+    ) -> Result<Self> {
+        use slatedb::{config::DbReaderOptions, DbReader};
+
+        let reader = DbReader::open(
+            path,
+            object_store,
+            Some(checkpoint_id),
+            DbReaderOptions::default(),
+        )
+        .await
+        .map_err(|e| {
+            CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
+                "Failed to open checkpoint reader: {:?}",
+                e
+            )))
+        })?;
+
+        let tree = SlateDbBackedTree::from_reader(Arc::new(reader)).await.map_err(|e| {
+            CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
+                "Failed to create SlateDbBackedTree from reader: {:?}",
+                e
+            )))
+        })?;
+
+        Ok(Self {
+            tree: tokio::sync::RwLock::new(tree),
+        })
+    }
+
     pub async fn size(&self) -> Result<u64> {
         let tree = self.tree.read().await;
         tree.len().await.map_err(|e| {

@@ -5,7 +5,7 @@ use crate::{
 use alloc::{format, string::String, string::ToString, vec::Vec};
 use core::fmt;
 use digest::Digest;
-use slatedb::{Db, WriteBatch};
+use slatedb::{Db, DbReader, WriteBatch};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -40,6 +40,42 @@ impl From<slatedb::SlateDBError> for SlateDbTreeError {
     }
 }
 
+/// Enum to hold either a read-write Db or a read-only DbReader
+pub enum DbHandle {
+    ReadWrite(Arc<Db>),
+    ReadOnly(Arc<DbReader>),
+}
+
+impl DbHandle {
+    async fn get(
+        &self,
+        key: &[u8],
+    ) -> Result<Option<slatedb::bytes::Bytes>, slatedb::SlateDBError> {
+        match self {
+            DbHandle::ReadWrite(db) => db.get(key).await,
+            DbHandle::ReadOnly(reader) => reader.get(key).await,
+        }
+    }
+
+    async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), SlateDbTreeError> {
+        match self {
+            DbHandle::ReadWrite(db) => db.put(key, value).await.map_err(Into::into),
+            DbHandle::ReadOnly(_) => Err(SlateDbTreeError::InconsistentState(
+                "Cannot write to read-only database".into(),
+            )),
+        }
+    }
+
+    async fn write(&self, batch: WriteBatch) -> Result<(), SlateDbTreeError> {
+        match self {
+            DbHandle::ReadWrite(db) => db.write(batch).await.map_err(Into::into),
+            DbHandle::ReadOnly(_) => Err(SlateDbTreeError::InconsistentState(
+                "Cannot write to read-only database".into(),
+            )),
+        }
+    }
+}
+
 /// A SlateDB-backed append-only Merkle tree implementation.
 ///
 /// This implementation stores only the necessary data in SlateDB:
@@ -54,7 +90,7 @@ where
     H: Digest,
     T: HashableLeaf,
 {
-    db: Arc<Db>,
+    db: DbHandle,
     _phantom_h: core::marker::PhantomData<H>,
     _phantom_t: core::marker::PhantomData<T>,
 }
@@ -70,7 +106,7 @@ where
 {
     pub async fn new(db: Arc<Db>) -> Result<Self, SlateDbTreeError> {
         let tree = Self {
-            db,
+            db: DbHandle::ReadWrite(db),
             _phantom_h: core::marker::PhantomData,
             _phantom_t: core::marker::PhantomData,
         };
@@ -80,6 +116,16 @@ where
         if existing_leaves.is_none() {
             tree.set_num_leaves(0).await?;
         }
+
+        Ok(tree)
+    }
+
+    pub async fn from_reader(reader: Arc<DbReader>) -> Result<Self, SlateDbTreeError> {
+        let tree = Self {
+            db: DbHandle::ReadOnly(reader),
+            _phantom_h: core::marker::PhantomData,
+            _phantom_t: core::marker::PhantomData,
+        };
 
         Ok(tree)
     }
@@ -101,12 +147,11 @@ where
     async fn get_num_leaves(&self) -> Result<Option<u64>, SlateDbTreeError> {
         match self.db.get(META_KEY).await? {
             Some(bytes) => {
-                let num_leaves = u64::from_be_bytes(
-                    bytes
-                        .as_ref()
-                        .try_into()
-                        .map_err(|_| SlateDbTreeError::EncodingError("Invalid metadata".into()))?,
-                );
+                let bytes_ref: &[u8] = bytes.as_ref();
+                let bytes_array: [u8; 8] = bytes_ref
+                    .try_into()
+                    .map_err(|_| SlateDbTreeError::EncodingError("Invalid metadata".into()))?;
+                let num_leaves = u64::from_be_bytes(bytes_array);
                 Ok(Some(num_leaves))
             }
             None => Ok(None),
@@ -114,8 +159,7 @@ where
     }
 
     async fn set_num_leaves(&self, num_leaves: u64) -> Result<(), SlateDbTreeError> {
-        self.db.put(META_KEY, &num_leaves.to_be_bytes()).await?;
-        Ok(())
+        self.db.put(META_KEY, &num_leaves.to_be_bytes()).await
     }
 
     pub async fn len(&self) -> Result<u64, SlateDbTreeError> {

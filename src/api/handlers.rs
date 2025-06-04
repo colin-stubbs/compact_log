@@ -346,9 +346,25 @@ pub async fn add_pre_chain(
 pub async fn get_sth(
     State(state): State<Arc<ApiState>>,
 ) -> ApiResult<crate::types::tree_head::SthResponse> {
-    let tree = state.merkle_tree.read().await;
+    let checkpoint_metadata = state.storage.get_latest_checkpoint().await.ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "No checkpoint available yet".to_string(),
+            }),
+        )
+    })?;
 
-    let (tree_size_result, root_result) = tokio::join!(tree.size(), tree.root());
+    let checkpoint_tree = crate::merkle_storage::StorageBackedMerkleTree::from_checkpoint(
+        state.db_path.clone(),
+        state.object_store.clone(),
+        checkpoint_metadata.id,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
+
+    let (tree_size_result, root_result) =
+        tokio::join!(checkpoint_tree.size(), checkpoint_tree.root());
 
     let tree_size =
         tree_size_result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
@@ -357,7 +373,7 @@ pub async fn get_sth(
 
     let sth = state
         .sth_builder
-        .create_sth(tree_size, root_hash)
+        .create_sth(tree_size, root_hash, Some(checkpoint_metadata.timestamp))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
 
     Ok(Json(sth.to_api_response()))
@@ -367,8 +383,24 @@ pub async fn get_sth_consistency(
     State(state): State<Arc<ApiState>>,
     Query(params): Query<GetConsistencyProofRequest>,
 ) -> ApiResult<GetConsistencyProofResponse> {
-    let tree = state.merkle_tree.read().await;
-    let proof = tree
+    let checkpoint_metadata = state.storage.get_latest_checkpoint().await.ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "No checkpoint available yet".to_string(),
+            }),
+        )
+    })?;
+
+    let checkpoint_tree = crate::merkle_storage::StorageBackedMerkleTree::from_checkpoint(
+        state.db_path.clone(),
+        state.object_store.clone(),
+        checkpoint_metadata.id,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
+
+    let proof = checkpoint_tree
         .consistency_proof_between_sizes(params.first, params.second)
         .await
         .map_err(|e| match e {
@@ -419,8 +451,25 @@ pub async fn get_proof_by_hash(
         ));
     }
 
-    let tree = state.merkle_tree.read().await;
-    let proof = tree
+    // Use checkpoint for consistent proof generation
+    let checkpoint_metadata = state.storage.get_latest_checkpoint().await.ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "No checkpoint available yet".to_string(),
+            }),
+        )
+    })?;
+
+    let checkpoint_tree = crate::merkle_storage::StorageBackedMerkleTree::from_checkpoint(
+        state.db_path.clone(),
+        state.object_store.clone(),
+        checkpoint_metadata.id,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
+
+    let proof = checkpoint_tree
         .prove_inclusion_efficient(params.tree_size, leaf_index)
         .await
         .map_err(|e| match e {
@@ -714,8 +763,25 @@ pub async fn get_entry_and_proof(
         }
     }
 
-    let tree = state.merkle_tree.read().await;
-    let proof = tree
+    // Use checkpoint for consistent proof generation
+    let checkpoint_metadata = state.storage.get_latest_checkpoint().await.ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "No checkpoint available yet".to_string(),
+            }),
+        )
+    })?;
+
+    let checkpoint_tree = crate::merkle_storage::StorageBackedMerkleTree::from_checkpoint(
+        state.db_path.clone(),
+        state.object_store.clone(),
+        checkpoint_metadata.id,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
+
+    let proof = checkpoint_tree
         .prove_inclusion_efficient(tree_size, params.leaf_index)
         .await
         .map_err(|e| match e {

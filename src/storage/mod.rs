@@ -2,10 +2,12 @@ use crate::merkle_storage::StorageBackedMerkleTree;
 use crate::types::{sct::SignedCertificateTimestamp, LogEntry};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use slatedb::Db;
+use slatedb::{admin, config::CheckpointOptions, Db};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Mutex};
+use uuid::Uuid;
 
 #[derive(Error, Debug)]
 pub enum StorageError {
@@ -52,6 +54,13 @@ pub struct CertificateSctEntry {
     pub timestamp: u64,
 }
 
+/// Checkpoint metadata including ID and creation timestamp
+#[derive(Debug, Clone)]
+pub struct CheckpointMetadata {
+    pub id: Uuid,
+    pub timestamp: u64, // milliseconds since epoch
+}
+
 #[derive(Debug, Clone)]
 pub struct BatchConfig {
     /// Maximum number of entries to batch before flushing
@@ -77,6 +86,7 @@ impl KeyPrefix {
 pub struct CtStorage {
     pub(crate) db: Arc<Db>,
     batch_sender: mpsc::UnboundedSender<BatchEntry>,
+    latest_checkpoint: Arc<Mutex<Option<CheckpointMetadata>>>,
 }
 
 impl BatchConfig {
@@ -93,6 +103,8 @@ impl CtStorage {
         db: Arc<Db>,
         config: BatchConfig,
         merkle_tree: Arc<tokio::sync::RwLock<StorageBackedMerkleTree>>,
+        db_path: slatedb::object_store::path::Path,
+        object_store: Arc<dyn slatedb::object_store::ObjectStore>,
     ) -> Result<Self> {
         let (batch_sender, batch_receiver) = mpsc::unbounded_channel();
         let batch_mutex = Arc::new(Mutex::new(()));
@@ -103,7 +115,22 @@ impl CtStorage {
             Self::batch_worker(batch_receiver, config, mutex_clone, tree_clone).await;
         });
 
-        Ok(Self { db, batch_sender })
+        let latest_checkpoint = Arc::new(Mutex::new(None));
+
+        // Start checkpoint creation task
+        let checkpoint_mutex = latest_checkpoint.clone();
+        let db_path_clone = db_path.clone();
+        let object_store_clone = object_store.clone();
+
+        tokio::spawn(async move {
+            Self::checkpoint_worker(checkpoint_mutex, db_path_clone, object_store_clone).await;
+        });
+
+        Ok(Self {
+            db,
+            batch_sender,
+            latest_checkpoint,
+        })
     }
 
     /// Add entry to batch queue and return assigned index
@@ -420,6 +447,113 @@ impl CtStorage {
                 Ok(Some(entry))
             }
             None => Ok(None),
+        }
+    }
+
+    /// Get the latest checkpoint metadata
+    pub async fn get_latest_checkpoint(&self) -> Option<CheckpointMetadata> {
+        self.latest_checkpoint.lock().await.clone()
+    }
+
+    /// Background worker that creates checkpoints periodically
+    async fn checkpoint_worker(
+        latest_checkpoint: Arc<Mutex<Option<CheckpointMetadata>>>,
+        db_path: slatedb::object_store::path::Path,
+        object_store: Arc<dyn slatedb::object_store::ObjectStore>,
+    ) {
+        let checkpoint_interval = Duration::from_secs(1);
+        let checkpoint_lifetime = Duration::from_secs(3);
+
+        let mut interval = tokio::time::interval(checkpoint_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+
+            match admin::create_checkpoint(
+                db_path.clone(),
+                object_store.clone(),
+                &CheckpointOptions {
+                    lifetime: Some(checkpoint_lifetime),
+                    ..Default::default()
+                },
+            )
+            .await
+            {
+                Ok(result) => {
+                    // Check if tree has grown by getting current tree size
+                    let current_checkpoint = latest_checkpoint.lock().await.clone();
+
+                    // Get tree size from the new checkpoint
+                    let new_tree =
+                        match crate::merkle_storage::StorageBackedMerkleTree::from_checkpoint(
+                            db_path.clone(),
+                            object_store.clone(),
+                            result.id,
+                        )
+                        .await
+                        {
+                            Ok(tree) => tree,
+                            Err(e) => {
+                                tracing::error!("Failed to load checkpoint tree: {:?}", e);
+                                continue;
+                            }
+                        };
+
+                    let new_tree_size = match new_tree.size().await {
+                        Ok(size) => size,
+                        Err(e) => {
+                            tracing::error!("Failed to get tree size: {:?}", e);
+                            continue;
+                        }
+                    };
+
+                    // Get previous tree size if we have a previous checkpoint
+                    let (prev_tree_size, prev_timestamp) =
+                        if let Some(prev_checkpoint) = &current_checkpoint {
+                            match crate::merkle_storage::StorageBackedMerkleTree::from_checkpoint(
+                                db_path.clone(),
+                                object_store.clone(),
+                                prev_checkpoint.id,
+                            )
+                            .await
+                            {
+                                Ok(prev_tree) => match prev_tree.size().await {
+                                    Ok(size) => (size, prev_checkpoint.timestamp),
+                                    Err(_) => (0, prev_checkpoint.timestamp),
+                                },
+                                Err(_) => (0, prev_checkpoint.timestamp),
+                            }
+                        } else {
+                            (0, 0)
+                        };
+
+                    // Only update timestamp if tree has grown
+                    let timestamp = if new_tree_size > prev_tree_size {
+                        chrono::Utc::now().timestamp_millis() as u64
+                    } else {
+                        prev_timestamp
+                    };
+
+                    tracing::info!(
+                        "Created checkpoint: ID = {}, Tree size = {} (prev = {}), Timestamp = {} ({})",
+                        result.id,
+                        new_tree_size,
+                        prev_tree_size,
+                        timestamp,
+                        if new_tree_size > prev_tree_size { "new" } else { "reused" }
+                    );
+
+                    let mut checkpoint = latest_checkpoint.lock().await;
+                    *checkpoint = Some(CheckpointMetadata {
+                        id: result.id,
+                        timestamp,
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create checkpoint: {:?}", e);
+                }
+            }
         }
     }
 }

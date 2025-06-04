@@ -22,6 +22,8 @@ pub struct ApiState {
     pub sct_builder: Arc<SctBuilder>,
     pub sth_builder: Arc<SthBuilder>,
     pub validator: Option<Arc<CertificateValidator>>,
+    pub db_path: slatedb::object_store::path::Path,
+    pub object_store: Arc<dyn slatedb::object_store::ObjectStore>,
 }
 
 impl ApiState {
@@ -31,6 +33,8 @@ impl ApiState {
         log_id: LogId,
         private_key: Vec<u8>,
         validator: Option<Arc<CertificateValidator>>,
+        db_path: slatedb::object_store::path::Path,
+        object_store: Arc<dyn slatedb::object_store::ObjectStore>,
     ) -> crate::types::Result<Self> {
         let sct_builder = Arc::new(SctBuilder::from_private_key_bytes(
             log_id.clone(),
@@ -44,6 +48,8 @@ impl ApiState {
             sct_builder,
             sth_builder,
             validator,
+            db_path,
+            object_store,
         })
     }
 }
