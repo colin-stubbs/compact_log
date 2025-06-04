@@ -256,7 +256,7 @@ async fn initialize_storage(
     let block_cache = Arc::new(MokaCache::new_with_opts(cache_options));
 
     let mut db_options = Settings::default();
-    db_options.compression_codec = Some(CompressionCodec::Zstd);
+    // db_options.compression_codec = Some(CompressionCodec::Zstd);
 
     db_options.compactor_options = Some(slatedb::config::CompactorOptions {
         max_concurrent_compactions: num_cpus::get(),
