@@ -140,7 +140,7 @@ impl CtStorage {
         cert_hash: [u8; 32],
         sct: SignedCertificateTimestamp,
     ) -> Result<u64> {
-        tracing::debug!("add_entry_batched: Starting");
+        tracing::trace!("add_entry_batched: Starting");
 
         let (completion_tx, completion_rx) = oneshot::channel();
 
@@ -158,7 +158,7 @@ impl CtStorage {
             ));
         }
 
-        tracing::debug!("add_entry_batched: Sent to batch worker, waiting for completion");
+        tracing::trace!("add_entry_batched: Sent to batch worker, waiting for completion");
 
         let index = completion_rx.await.map_err(|_| {
             tracing::error!("add_entry_batched: Completion channel closed");
@@ -167,14 +167,14 @@ impl CtStorage {
 
         match index {
             Ok(idx) => {
-                tracing::debug!(
+                tracing::trace!(
                     "add_entry_batched: Received completion result with index {}",
                     idx
                 );
                 Ok(idx)
             }
             Err(e) => {
-                tracing::debug!("add_entry_batched: Received completion error");
+                tracing::error!("add_entry_batched: Received completion error");
                 Err(e)
             }
         }
@@ -198,7 +198,7 @@ impl CtStorage {
                     match entry {
                         Some(entry) => {
                             let was_empty = pending_entries.is_empty();
-                            tracing::debug!("batch_worker: Received entry");
+                            tracing::trace!("batch_worker: Received entry");
                             pending_entries.push(entry);
 
                             // If this is the first entry in the batch, reset the timeout
@@ -207,7 +207,7 @@ impl CtStorage {
                             }
 
                             if pending_entries.len() >= config.max_batch_size {
-                                tracing::debug!("batch_worker: Batch full, flushing {} entries", pending_entries.len());
+                                tracing::trace!("batch_worker: Batch full, flushing {} entries", pending_entries.len());
                                 Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone()).await;
                                 // Reset timeout for next batch
                                 timeout.as_mut().reset(tokio::time::Instant::now() + timeout_duration);
@@ -215,7 +215,7 @@ impl CtStorage {
                         }
                         None => {
                             if !pending_entries.is_empty() {
-                                tracing::debug!("batch_worker: Channel closed, flushing {} remaining entries", pending_entries.len());
+                                tracing::trace!("batch_worker: Channel closed, flushing {} remaining entries", pending_entries.len());
                                 Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone()).await;
                             }
                             tracing::info!("batch_worker: Exiting");
@@ -227,7 +227,7 @@ impl CtStorage {
                 // Timeout: flush pending entries
                 _ = &mut timeout => {
                     if !pending_entries.is_empty() {
-                        tracing::debug!("batch_worker: Timeout reached, flushing {} entries", pending_entries.len());
+                        tracing::trace!("batch_worker: Timeout reached, flushing {} entries", pending_entries.len());
                         Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone()).await;
                     }
                     // Reset timeout for next batch
@@ -244,13 +244,13 @@ impl CtStorage {
         merkle_tree: Arc<tokio::sync::RwLock<StorageBackedMerkleTree>>,
     ) {
         if entries.is_empty() {
-            tracing::debug!("flush_batch: No entries to flush");
+            tracing::trace!("flush_batch: No entries to flush");
             return;
         }
 
         let _lock = batch_mutex.lock().await;
 
-        tracing::debug!("flush_batch: Flushing {} entries", entries.len());
+        tracing::trace!("flush_batch: Flushing {} entries", entries.len());
 
         let mut leaf_data_vec = Vec::new();
         let mut entry_metadata = Vec::new();
@@ -274,7 +274,7 @@ impl CtStorage {
         }
 
         let push_result = if !leaf_data_vec.is_empty() {
-            tracing::debug!(
+            tracing::trace!(
                 "flush_batch: Pushing {} entries to merkle tree",
                 leaf_data_vec.len()
             );
@@ -366,7 +366,7 @@ impl CtStorage {
             ))
         };
 
-        tracing::debug!(
+        tracing::trace!(
             "flush_batch: Completed with result: {:?}",
             push_result.is_ok()
         );
@@ -385,7 +385,7 @@ impl CtStorage {
                     } else {
                         let assigned_index = starting_index + valid_idx;
                         valid_idx += 1;
-                        tracing::debug!(
+                        tracing::trace!(
                             "flush_batch: Notifying entry {} with assigned index {}",
                             i,
                             assigned_index
@@ -405,7 +405,7 @@ impl CtStorage {
             }
         }
 
-        tracing::debug!("flush_batch: All entries notified");
+        tracing::trace!("flush_batch: All entries notified");
     }
 
     pub async fn get(&self, key: &str) -> Result<Option<Bytes>> {
