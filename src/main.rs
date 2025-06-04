@@ -109,8 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Creating merkle tree...");
     info!("DB initialized, attempting to create StorageBackedMerkleTree");
 
-    let merkle_tree =
-        merkle_storage::StorageBackedMerkleTree::new(storage.clone()).await?;
+    let merkle_tree = merkle_storage::StorageBackedMerkleTree::new(storage.clone()).await?;
     info!("StorageBackedMerkleTree created successfully");
 
     info!("Merkle tree created");
@@ -258,6 +257,11 @@ async fn initialize_storage(
 
     let mut db_options = Settings::default();
     db_options.compression_codec = Some(CompressionCodec::Zstd);
+
+    db_options.compactor_options = Some(slatedb::config::CompactorOptions {
+        max_concurrent_compactions: num_cpus::get(),
+        ..default::Default::default()
+    });
 
     db_options.object_store_cache_options = match cache_config {
         Some(cache) => ObjectStoreCacheOptions {

@@ -9,6 +9,7 @@ slatedb = { git = "https://github.com/slatedb/slatedb.git", rev = "207715315477d
     "zstd",
     "azure",
 ] }
+num_cpus = "1.17.0"
 bincode = { version = "2.0", features = ["std", "serde"] }
 ct-merkle = { path = "./ct-merkle", features = ["std", "serde", "slatedb"] }
 tokio = { version = "1", features = ["full"] }
