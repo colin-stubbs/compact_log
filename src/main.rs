@@ -244,11 +244,7 @@ fn load_private_key(path: &str) -> Result<SecretKey, Box<dyn std::error::Error>>
 async fn initialize_storage(
     storage_config: &StorageConfig,
 ) -> Result<(Arc<Db>, Path, Arc<dyn ObjectStore>), Box<dyn std::error::Error>> {
-    let cache_options = MokaCacheOptions {
-        max_capacity: 3 * 1024 * 1024 * 1024,
-        time_to_live: Some(std::time::Duration::from_secs(60 * 60)),
-        time_to_idle: Some(std::time::Duration::from_secs(60 * 30)),
-    };
+    let cache_options = MokaCacheOptions::default();
 
     let block_cache = Arc::new(MokaCache::new_with_opts(cache_options));
 
