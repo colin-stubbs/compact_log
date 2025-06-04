@@ -461,8 +461,8 @@ impl CtStorage {
         db_path: slatedb::object_store::path::Path,
         object_store: Arc<dyn slatedb::object_store::ObjectStore>,
     ) {
-        let checkpoint_interval = Duration::from_secs(60 * 10);
-        let checkpoint_lifetime = Duration::from_secs(60 * 15);
+        let checkpoint_interval = Duration::from_secs(60);
+        let checkpoint_lifetime = Duration::from_secs(60 * 3);
 
         let mut interval = tokio::time::interval(checkpoint_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
