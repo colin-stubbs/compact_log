@@ -4,7 +4,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use slatedb::{admin, config::CheckpointOptions, Db};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
@@ -16,6 +16,9 @@ pub enum StorageError {
 
     #[error("Invalid data format: {0}")]
     InvalidFormat(String),
+
+    #[error("Queue full - system at capacity")]
+    QueueFull,
 }
 
 impl Clone for StorageError {
@@ -25,6 +28,7 @@ impl Clone for StorageError {
                 StorageError::InvalidFormat("SlateDB error during batch processing".to_string())
             }
             StorageError::InvalidFormat(s) => StorageError::InvalidFormat(s.clone()),
+            StorageError::QueueFull => StorageError::QueueFull,
         }
     }
 }
@@ -61,6 +65,16 @@ pub struct CheckpointMetadata {
     pub timestamp: u64, // milliseconds since epoch
 }
 
+/// Statistics for batch processing
+#[derive(Debug, Default)]
+struct BatchStats {
+    batches_flushed: u64,
+    total_entries: u64,
+    total_flush_time_ms: u64,
+    min_batch_size: usize,
+    max_batch_size: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct BatchConfig {
     /// Maximum number of entries to batch before flushing
@@ -85,15 +99,15 @@ impl KeyPrefix {
 /// Storage backend for Certificate Transparency log using SlateDB with batching
 pub struct CtStorage {
     pub(crate) db: Arc<Db>,
-    batch_sender: mpsc::UnboundedSender<BatchEntry>,
+    batch_sender: mpsc::Sender<BatchEntry>,
     latest_checkpoint: Arc<Mutex<Option<CheckpointMetadata>>>,
 }
 
 impl BatchConfig {
     pub fn default() -> Self {
         Self {
-            max_batch_size: 10_000,
-            max_batch_timeout_ms: 1_000,
+            max_batch_size: 1_000,
+            max_batch_timeout_ms: 100,
         }
     }
 }
@@ -106,13 +120,19 @@ impl CtStorage {
         db_path: slatedb::object_store::path::Path,
         object_store: Arc<dyn slatedb::object_store::ObjectStore>,
     ) -> Result<Self> {
-        let (batch_sender, batch_receiver) = mpsc::unbounded_channel();
+        // Use a bounded channel to provide backpressure
+        // Channel size is 2x the max batch size to allow some buffering
+        let channel_capacity = config.max_batch_size * 2;
+        let (batch_sender, batch_receiver) = mpsc::channel(channel_capacity);
         let batch_mutex = Arc::new(Mutex::new(()));
 
         let mutex_clone = batch_mutex.clone();
         let tree_clone = merkle_tree.clone();
+        let batch_stats = Arc::new(Mutex::new(BatchStats::default()));
+        let stats_clone = batch_stats.clone();
+
         tokio::spawn(async move {
-            Self::batch_worker(batch_receiver, config, mutex_clone, tree_clone).await;
+            Self::batch_worker(batch_receiver, config, mutex_clone, tree_clone, stats_clone).await;
         });
 
         let latest_checkpoint = Arc::new(Mutex::new(None));
@@ -124,6 +144,13 @@ impl CtStorage {
 
         tokio::spawn(async move {
             Self::checkpoint_worker(checkpoint_mutex, db_path_clone, object_store_clone).await;
+        });
+
+        // Start metrics logging task
+        let metrics_sender = batch_sender.clone();
+        let metrics_stats = batch_stats.clone();
+        tokio::spawn(async move {
+            Self::metrics_worker(metrics_sender, metrics_stats).await;
         });
 
         Ok(Self {
@@ -151,14 +178,31 @@ impl CtStorage {
             completion_tx,
         };
 
-        if self.batch_sender.send(batch_entry).is_err() {
-            tracing::error!("add_entry_batched: Failed to send to batch worker");
-            return Err(StorageError::InvalidFormat(
-                "Batch worker not running".into(),
-            ));
+        match self.batch_sender.try_send(batch_entry) {
+            Ok(_) => {
+                let queue_len = self.batch_sender.max_capacity() - self.batch_sender.capacity();
+                tracing::debug!(
+                    "add_entry_batched: Sent to batch worker, queue depth: {}/{}",
+                    queue_len,
+                    self.batch_sender.max_capacity()
+                );
+            }
+            Err(e) => match e {
+                mpsc::error::TrySendError::Full(_) => {
+                    tracing::warn!(
+                        "add_entry_batched: Batch queue is full at capacity {}",
+                        self.batch_sender.max_capacity()
+                    );
+                    return Err(StorageError::QueueFull);
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    tracing::error!("add_entry_batched: Batch worker not running");
+                    return Err(StorageError::InvalidFormat(
+                        "Batch worker not running".into(),
+                    ));
+                }
+            },
         }
-
-        tracing::trace!("add_entry_batched: Sent to batch worker, waiting for completion");
 
         let index = completion_rx.await.map_err(|_| {
             tracing::error!("add_entry_batched: Completion channel closed");
@@ -182,10 +226,11 @@ impl CtStorage {
 
     /// Background worker that batches and flushes entries
     async fn batch_worker(
-        mut batch_receiver: mpsc::UnboundedReceiver<BatchEntry>,
+        mut batch_receiver: mpsc::Receiver<BatchEntry>,
         config: BatchConfig,
         batch_mutex: Arc<Mutex<()>>,
         merkle_tree: StorageBackedMerkleTree,
+        batch_stats: Arc<Mutex<BatchStats>>,
     ) {
         tracing::info!("batch_worker: Starting background worker");
         let mut pending_entries = Vec::with_capacity(config.max_batch_size);
@@ -208,7 +253,7 @@ impl CtStorage {
 
                             if pending_entries.len() >= config.max_batch_size {
                                 tracing::trace!("batch_worker: Batch full, flushing {} entries", pending_entries.len());
-                                Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone()).await;
+                                Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
                                 // Reset timeout for next batch
                                 timeout.as_mut().reset(tokio::time::Instant::now() + timeout_duration);
                             }
@@ -216,7 +261,7 @@ impl CtStorage {
                         None => {
                             if !pending_entries.is_empty() {
                                 tracing::trace!("batch_worker: Channel closed, flushing {} remaining entries", pending_entries.len());
-                                Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone()).await;
+                                Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
                             }
                             tracing::info!("batch_worker: Exiting");
                             break;
@@ -228,7 +273,7 @@ impl CtStorage {
                 _ = &mut timeout => {
                     if !pending_entries.is_empty() {
                         tracing::trace!("batch_worker: Timeout reached, flushing {} entries", pending_entries.len());
-                        Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone()).await;
+                        Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
                     }
                     // Reset timeout for next batch
                     timeout.as_mut().reset(tokio::time::Instant::now() + timeout_duration);
@@ -242,6 +287,7 @@ impl CtStorage {
         entries: &mut Vec<BatchEntry>,
         batch_mutex: Arc<Mutex<()>>,
         merkle_tree: StorageBackedMerkleTree,
+        batch_stats: Arc<Mutex<BatchStats>>,
     ) {
         if entries.is_empty() {
             tracing::trace!("flush_batch: No entries to flush");
@@ -249,8 +295,10 @@ impl CtStorage {
         }
 
         let _lock = batch_mutex.lock().await;
+        let start_time = Instant::now();
+        let batch_size = entries.len();
 
-        tracing::trace!("flush_batch: Flushing {} entries", entries.len());
+        tracing::trace!("flush_batch: Flushing {} entries", batch_size);
 
         let mut leaf_data_vec = Vec::new();
         let mut entry_metadata = Vec::new();
@@ -401,7 +449,24 @@ impl CtStorage {
             }
         }
 
-        tracing::trace!("flush_batch: All entries notified");
+        // Record batch statistics
+        let flush_time_ms = start_time.elapsed().as_millis() as u64;
+        let mut stats = batch_stats.lock().await;
+        stats.batches_flushed += 1;
+        stats.total_entries += batch_size as u64;
+        stats.total_flush_time_ms += flush_time_ms;
+
+        if stats.min_batch_size == 0 || batch_size < stats.min_batch_size {
+            stats.min_batch_size = batch_size;
+        }
+        if batch_size > stats.max_batch_size {
+            stats.max_batch_size = batch_size;
+        }
+
+        tracing::trace!(
+            "flush_batch: All entries notified, took {}ms",
+            flush_time_ms
+        );
     }
 
     pub async fn get(&self, key: &str) -> Result<Option<Bytes>> {
@@ -449,6 +514,75 @@ impl CtStorage {
     /// Get the latest checkpoint metadata
     pub async fn get_latest_checkpoint(&self) -> Option<CheckpointMetadata> {
         self.latest_checkpoint.lock().await.clone()
+    }
+
+    /// Background worker that logs queue metrics periodically
+    async fn metrics_worker(
+        batch_sender: mpsc::Sender<BatchEntry>,
+        batch_stats: Arc<Mutex<BatchStats>>,
+    ) {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let mut last_stats = BatchStats::default();
+
+        loop {
+            interval.tick().await;
+
+            // Get current queue depth
+            let capacity = batch_sender.capacity();
+            let max_capacity = batch_sender.max_capacity();
+            let current_depth = max_capacity - capacity;
+            let utilization_percent = (current_depth as f64 / max_capacity as f64) * 100.0;
+
+            // Get batch statistics
+            let stats = batch_stats.lock().await;
+            let interval_batches = stats.batches_flushed - last_stats.batches_flushed;
+            let interval_entries = stats.total_entries - last_stats.total_entries;
+            let interval_time_ms = stats.total_flush_time_ms - last_stats.total_flush_time_ms;
+
+            if interval_batches > 0 {
+                let avg_batch_size = interval_entries / interval_batches;
+                let avg_flush_time = interval_time_ms / interval_batches;
+                let throughput = (interval_entries as f64 / 5.0) as u64; // entries per second
+
+                tracing::info!(
+                    "Batch stats: {} batches flushed (avg size: {}, avg time: {}ms), throughput: {} entries/sec, queue: {}/{}",
+                    interval_batches,
+                    avg_batch_size,
+                    avg_flush_time,
+                    throughput,
+                    current_depth,
+                    max_capacity
+                );
+            } else {
+                tracing::info!(
+                    "Batch stats: No batches flushed in last 5s, queue: {}/{}",
+                    current_depth,
+                    max_capacity
+                );
+            }
+
+            // Clone current stats for next interval
+            last_stats = BatchStats {
+                batches_flushed: stats.batches_flushed,
+                total_entries: stats.total_entries,
+                total_flush_time_ms: stats.total_flush_time_ms,
+                min_batch_size: stats.min_batch_size,
+                max_batch_size: stats.max_batch_size,
+            };
+            drop(stats);
+
+            // Still warn about queue depth
+            if utilization_percent > 90.0 {
+                tracing::warn!(
+                    "Queue utilization critical: {}%",
+                    utilization_percent as u32
+                );
+            } else if utilization_percent > 75.0 {
+                tracing::warn!("Queue utilization high: {}%", utilization_percent as u32);
+            }
+        }
     }
 
     /// Background worker that creates checkpoints periodically

@@ -1,13 +1,3 @@
-use axum::{
-    extract::{Query, State},
-    http::StatusCode,
-    response::Json,
-};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use x509_cert::der::Decode;
-
 use crate::{
     api::{ApiState, ErrorResponse},
     merkle_storage::serialization,
@@ -17,6 +7,15 @@ use crate::{
         LeafEntry,
     },
 };
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::Json,
+};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use x509_cert::der::Decode;
 
 type ApiResult<T> = std::result::Result<Json<T>, (StatusCode, Json<ErrorResponse>)>;
 
@@ -161,7 +160,15 @@ pub async fn add_chain(
         .storage
         .add_entry_batched(log_entry, cert_hash, sct.clone())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
+        .map_err(|e| match e {
+            crate::storage::StorageError::QueueFull => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "Service temporarily unavailable - system at capacity".to_string(),
+                }),
+            ),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())),
+        })?;
 
     let response = AddChainResponse {
         sct_version: sct.version as u8,
@@ -643,7 +650,9 @@ pub async fn get_entry_and_proof(
     Query(params): Query<GetEntryAndProofRequest>,
 ) -> ApiResult<GetEntryAndProofResponse> {
     let tree_size = params.tree_size.unwrap_or({
-        state.merkle_tree.size()
+        state
+            .merkle_tree
+            .size()
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?
     });
