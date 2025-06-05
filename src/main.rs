@@ -1,10 +1,11 @@
+use bincode::de;
 use config::Config;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::LineEnding;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use p256::SecretKey;
 use serde::{Deserialize, Serialize};
-use slatedb::config::{CompressionCodec, ObjectStoreCacheOptions};
+use slatedb::config::{CompactorOptions, CompressionCodec, ObjectStoreCacheOptions};
 use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
 use slatedb::{
     object_store::{
@@ -16,6 +17,7 @@ use slatedb::{
 
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use std::{default, fs};
 use tokio::net::TcpListener;
 use tracing::info;
@@ -264,10 +266,15 @@ async fn initialize_storage(
     let mut db_options = Settings::default();
     // db_options.compression_codec = Some(CompressionCodec::Zstd);
 
-    db_options.compactor_options = Some(slatedb::config::CompactorOptions {
-        max_concurrent_compactions: num_cpus::get(),
+    let compactor_options: CompactorOptions = CompactorOptions {
+        poll_interval: Duration::from_millis(100),
+        max_sst_size: 64 * 1024 * 1024, // 64 MB
+        max_concurrent_compactions: 4,
+
         ..default::Default::default()
-    });
+    };
+
+    db_options.compactor_options = Some(compactor_options);
 
     db_options.object_store_cache_options = match cache_config {
         Some(cache) => ObjectStoreCacheOptions {
