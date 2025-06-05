@@ -1,6 +1,6 @@
 use crate::types::{CtError, Result};
 use ct_merkle::{
-    optimized_slatedb_tree::OptimizedSlateDbTree, ConsistencyProof, InclusionProof, RootHash,
+    slatedb_backed_tree::SlateDbBackedTree, ConsistencyProof, InclusionProof, RootHash,
 };
 use sha2::Sha256;
 use slatedb::Db;
@@ -39,12 +39,12 @@ impl<'de> serde::Deserialize<'de> for Certificate {
 /// Storage-backed Merkle tree using ct-merkle's SlateDbBackedTree
 #[derive(Clone)]
 pub struct StorageBackedMerkleTree {
-    tree: Arc<OptimizedSlateDbTree<Sha256, Certificate>>,
+    tree: Arc<SlateDbBackedTree<Sha256, Certificate>>,
 }
 
 impl StorageBackedMerkleTree {
     pub async fn new(db: Arc<Db>) -> Result<Self> {
-        let tree = OptimizedSlateDbTree::new(db).await.map_err(|e| {
+        let tree = SlateDbBackedTree::new(db).await.map_err(|e| {
             CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
                 "Failed to create SlateDbBackedTree: {:?}",
                 e
@@ -77,7 +77,7 @@ impl StorageBackedMerkleTree {
             )))
         })?;
 
-        let tree = OptimizedSlateDbTree::from_reader(Arc::new(reader))
+        let tree = SlateDbBackedTree::from_reader(Arc::new(reader))
             .await
             .map_err(|e| {
                 CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
