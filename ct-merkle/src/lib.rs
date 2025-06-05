@@ -20,6 +20,10 @@ mod tree_util;
 #[cfg_attr(docsrs, doc(cfg(feature = "slatedb")))]
 pub mod slatedb_backed_tree;
 
+#[cfg(feature = "slatedb")]
+#[cfg_attr(docsrs, doc(cfg(feature = "slatedb")))]
+pub mod optimized_slatedb_tree;
+
 #[cfg(test)]
 mod test_util;
 
