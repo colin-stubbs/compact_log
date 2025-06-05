@@ -276,9 +276,11 @@ impl CtStorage {
                 _ = interval.tick() => {
                     // Time-based flush
                     if !pending_entries.is_empty() {
-                        tracing::info!("batch_worker: Time flush after {}ms, flushing {} entries",
+                        let time = Instant::now();
+                        tracing::trace!("batch_worker: Time flush after {}ms, flushing {} entries",
                             timeout_duration.as_millis(), pending_entries.len());
                         Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
+                        tracing::info!("batch_worker: Flushed in {}ms", time.elapsed().as_millis());
                     }
                 }
             }
