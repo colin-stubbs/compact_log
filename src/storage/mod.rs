@@ -106,8 +106,8 @@ pub struct CtStorage {
 impl BatchConfig {
     pub fn default() -> Self {
         Self {
-            max_batch_size: 1_000,
-            max_batch_timeout_ms: 500,
+            max_batch_size: 10_000,
+            max_batch_timeout_ms: 100,
         }
     }
 }
@@ -122,7 +122,7 @@ impl CtStorage {
     ) -> Result<Self> {
         // Use a bounded channel to provide backpressure
         // Channel size is 2x the max batch size to allow some buffering, min 1k.
-        let channel_capacity = (config.max_batch_size * 2).max(1_000);
+        let channel_capacity = (config.max_batch_size * 2).max(2_000);
         let (batch_sender, batch_receiver) = mpsc::channel(channel_capacity);
         let batch_mutex = Arc::new(Mutex::new(()));
 
