@@ -39,7 +39,7 @@ impl<'de> serde::Deserialize<'de> for Certificate {
 /// Storage-backed Merkle tree using ct-merkle's SlateDbBackedTree
 #[derive(Clone)]
 pub struct StorageBackedMerkleTree {
-    tree: Arc<tokio::sync::RwLock<SlateDbBackedTree<Sha256, Certificate>>>,
+    tree: Arc<SlateDbBackedTree<Sha256, Certificate>>,
 }
 
 impl StorageBackedMerkleTree {
@@ -52,7 +52,7 @@ impl StorageBackedMerkleTree {
         })?;
 
         Ok(Self {
-            tree: Arc::new(tokio::sync::RwLock::new(tree)),
+            tree: Arc::new(tree),
         })
     }
 
@@ -87,13 +87,12 @@ impl StorageBackedMerkleTree {
             })?;
 
         Ok(Self {
-            tree: Arc::new(tokio::sync::RwLock::new(tree)),
+            tree: Arc::new(tree),
         })
     }
 
     pub async fn size(&self) -> Result<u64> {
-        let tree = self.tree.read().await;
-        tree.len().await.map_err(|e| {
+        self.tree.len().await.map_err(|e| {
             CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
                 "Failed to get tree size: {:?}",
                 e
@@ -106,12 +105,12 @@ impl StorageBackedMerkleTree {
         cert_data_vec: Vec<Vec<u8>>,
         additional_data: Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<u64> {
-        let mut tree = self.tree.write().await;
         let certificates: Vec<Certificate> = cert_data_vec
             .into_iter()
             .map(|data| Certificate { data })
             .collect();
-        tree.batch_push_with_data(certificates, additional_data)
+        self.tree
+            .batch_push_with_data(certificates, additional_data)
             .await
             .map_err(|e| {
                 CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
@@ -122,8 +121,7 @@ impl StorageBackedMerkleTree {
     }
 
     pub async fn root(&self) -> Result<RootHash<Sha256>> {
-        let tree = self.tree.read().await;
-        tree.root().await.map_err(|e| {
+        self.tree.root().await.map_err(|e| {
             CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
                 "Failed to get root: {:?}",
                 e
@@ -151,8 +149,7 @@ impl StorageBackedMerkleTree {
             )));
         }
 
-        let tree = self.tree.read().await;
-        let proof = (*tree).prove_inclusion(leaf_index).await.map_err(|e| {
+        let proof = self.tree.prove_inclusion(leaf_index).await.map_err(|e| {
             CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
                 "Failed to prove inclusion: {:?}",
                 e
@@ -197,8 +194,8 @@ impl StorageBackedMerkleTree {
             )));
         }
 
-        let tree = self.tree.read().await;
-        let proof = (*tree)
+        let proof = self
+            .tree
             .prove_consistency_between(old_tree_size, new_tree_size)
             .await
             .map_err(|e| {

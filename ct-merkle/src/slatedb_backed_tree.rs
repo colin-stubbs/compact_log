@@ -181,7 +181,7 @@ where
     /// This ensures consistency between the merkle tree and any associated data.
     /// Returns the starting index of the newly added items.
     pub async fn batch_push_with_data(
-        &mut self,
+        &self,
         items: Vec<T>,
         additional_data: Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<u64, SlateDbTreeError> {
