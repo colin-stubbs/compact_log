@@ -6,7 +6,7 @@ use crate::{
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
-use std::{eprintln, vec};
+use std::vec;
 
 use digest::{typenum::Unsigned, Digest};
 use subtle::ConstantTimeEq;
