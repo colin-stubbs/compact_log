@@ -22,6 +22,7 @@ bincode = { version = "1.3", optional = true }
 tokio = { version = "1", features = ["rt", "macros"], optional = true }
 sha2 = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }
+futures = { version = "0.3", optional = true }
 
 [features]
 default = []
@@ -33,6 +34,7 @@ slatedb = [
     "dep:tokio",
     "dep:sha2",
     "dep:hex",
+    "dep:futures",
     "std",
     "serde",
 ]

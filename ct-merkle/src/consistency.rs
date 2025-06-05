@@ -4,9 +4,8 @@ use crate::{
     error::ConsistencyVerifError, mem_backed_tree::MemoryBackedTree, tree_util::*, RootHash,
 };
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::marker::PhantomData;
-use std::vec;
 
 use digest::{typenum::Unsigned, Digest};
 use subtle::ConstantTimeEq;

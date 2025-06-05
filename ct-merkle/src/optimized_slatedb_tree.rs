@@ -246,7 +246,7 @@ where
                 }
             }
 
-            // Yield only on every 4th level to reduce context switching
+            // Yield periodically to prevent blocking the runtime
             if idx.level() % 4 == 0 {
                 tokio::task::yield_now().await;
             }
@@ -255,122 +255,11 @@ where
             let left_child = idx.left_child();
             let right_child = idx.right_child(num_leaves);
 
-            let left_hash = self.get_or_compute_hash(left_child, num_leaves).await?;
-            let right_hash = self.get_or_compute_hash(right_child, num_leaves).await?;
-
-            Ok(parent_hash::<H>(&left_hash, &right_hash))
-        })
-    }
-
-    /// Appends the given item to the end of the list.
-    pub async fn push(&mut self, new_val: T) -> Result<(), OptimizedSlateDbTreeError> {
-        let num_leaves = self.len().await?;
-
-        if num_leaves >= u64::MAX / 2 {
-            return Err(OptimizedSlateDbTreeError::InconsistentState(
-                "Tree is full".into(),
-            ));
-        }
-
-        let mut batch = WriteBatch::new();
-
-        // Store the leaf value
-        let leaf_bytes = bincode::serialize(&new_val)
-            .map_err(|e| OptimizedSlateDbTreeError::EncodingError(e.to_string()))?;
-        batch.put(&Self::leaf_key(num_leaves), &leaf_bytes);
-
-        // Update frontier nodes
-        let new_num_leaves = num_leaves + 1;
-
-        // Remove old frontier nodes that are no longer needed
-        let old_frontier = Self::frontier_indices(num_leaves);
-        let new_frontier = Self::frontier_indices(new_num_leaves);
-
-        // Find nodes to remove (in old but not in new)
-        for old_idx in &old_frontier {
-            if !new_frontier
-                .iter()
-                .any(|new_idx| new_idx.as_u64() == old_idx.as_u64())
-            {
-                batch.delete(&Self::frontier_key(old_idx.as_u64()));
-            }
-        }
-
-        // Compute and store new frontier nodes
-        for frontier_idx in &new_frontier {
-            // Only compute if it's not already stored
-            if !old_frontier
-                .iter()
-                .any(|old_idx| old_idx.as_u64() == frontier_idx.as_u64())
-            {
-                let hash = self
-                    .compute_subtree_hash(*frontier_idx, new_num_leaves, &new_val, num_leaves)
-                    .await?;
-                batch.put(&Self::frontier_key(frontier_idx.as_u64()), hash.as_ref());
-            }
-        }
-
-        // Update metadata
-        batch.put(META_KEY, &new_num_leaves.to_be_bytes());
-
-        self.db.write(batch).await?;
-
-        Ok(())
-    }
-
-    /// Computes the hash of a subtree, using the new leaf if applicable
-    fn compute_subtree_hash<'a>(
-        &'a self,
-        idx: InternalIdx,
-        num_leaves: u64,
-        new_leaf: &'a T,
-        old_num_leaves: u64,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<digest::Output<H>, OptimizedSlateDbTreeError>>
-                + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            // If this is the new leaf, compute its hash
-            if idx.level() == 0 && idx.as_u64() / 2 == old_num_leaves {
-                return Ok(leaf_hash::<H, _>(new_leaf));
-            }
-
-            // If it's a leaf node, get from storage
-            if idx.level() == 0 {
-                let leaf_idx = idx.as_u64() / 2;
-                if let Some(bytes) = self.db.get(&Self::leaf_key(leaf_idx)).await? {
-                    let leaf: T = bincode::deserialize(&bytes)
-                        .map_err(|e| OptimizedSlateDbTreeError::EncodingError(e.to_string()))?;
-                    return Ok(leaf_hash::<H, _>(&leaf));
-                } else {
-                    return Ok(digest::Output::<H>::default());
-                }
-            }
-
-            // Yield to prevent blocking the runtime during deep recursion
-            tokio::task::yield_now().await;
-
-            // Otherwise, compute from children
-            let left_child = idx.left_child();
-            let right_child = idx.right_child(num_leaves);
-
-            let left_hash = if left_child.as_u64() / 2 < old_num_leaves {
-                self.get_or_compute_hash(left_child, old_num_leaves).await?
-            } else {
-                self.compute_subtree_hash(left_child, num_leaves, new_leaf, old_num_leaves)
-                    .await?
-            };
-
-            let right_hash = if right_child.as_u64() / 2 < old_num_leaves {
-                self.get_or_compute_hash(right_child, old_num_leaves)
-                    .await?
-            } else {
-                self.compute_subtree_hash(right_child, num_leaves, new_leaf, old_num_leaves)
-                    .await?
-            };
+            let (left_hash, right_hash) = futures::future::try_join(
+                self.get_or_compute_hash(left_child, num_leaves),
+                self.get_or_compute_hash(right_child, num_leaves),
+            )
+            .await?;
 
             Ok(parent_hash::<H>(&left_hash, &right_hash))
         })
@@ -412,10 +301,23 @@ where
         let new_num_leaves = starting_index + items.len() as u64;
         let new_frontier = Self::frontier_indices(new_num_leaves);
 
-        for frontier_idx in &new_frontier {
-            let hash = self
-                .compute_batch_subtree_hash(*frontier_idx, new_num_leaves, &items, starting_index)
-                .await?;
+        // Compute all frontier hashes in parallel
+        let hash_futures: Vec<_> = new_frontier
+            .iter()
+            .map(|&frontier_idx| {
+                self.compute_batch_subtree_hash(
+                    frontier_idx,
+                    new_num_leaves,
+                    &items,
+                    starting_index,
+                )
+            })
+            .collect();
+
+        let frontier_hashes = futures::future::try_join_all(hash_futures).await?;
+
+        // Store the computed hashes
+        for (frontier_idx, hash) in new_frontier.iter().zip(frontier_hashes.iter()) {
             batch.put(&Self::frontier_key(frontier_idx.as_u64()), hash.as_ref());
         }
 
@@ -468,19 +370,20 @@ where
                 }
             }
 
-            // Yield to prevent blocking the runtime during deep recursion
-            tokio::task::yield_now().await;
+            // Yield periodically to prevent blocking the runtime
+            if idx.level() % 4 == 0 {
+                tokio::task::yield_now().await;
+            }
 
             // Otherwise, compute from children
             let left_child = idx.left_child();
             let right_child = idx.right_child(num_leaves);
 
-            let left_hash = self
-                .compute_batch_subtree_hash(left_child, num_leaves, new_items, starting_index)
-                .await?;
-            let right_hash = self
-                .compute_batch_subtree_hash(right_child, num_leaves, new_items, starting_index)
-                .await?;
+            let (left_hash, right_hash) = futures::future::try_join(
+                self.compute_batch_subtree_hash(left_child, num_leaves, new_items, starting_index),
+                self.compute_batch_subtree_hash(right_child, num_leaves, new_items, starting_index),
+            )
+            .await?;
 
             Ok(parent_hash::<H>(&left_hash, &right_hash))
         })
@@ -527,13 +430,13 @@ where
 
         let idxs = indices_for_inclusion_proof(num_leaves, idx);
 
-        let mut sibling_hashes = Vec::with_capacity(idxs.len());
-        for &node_idx in &idxs {
-            let hash = self
-                .get_or_compute_hash(InternalIdx::new(node_idx), num_leaves)
-                .await?;
-            sibling_hashes.push(hash);
-        }
+        // Fetch all sibling hashes in parallel
+        let hash_futures: Vec<_> = idxs
+            .iter()
+            .map(|&node_idx| self.get_or_compute_hash(InternalIdx::new(node_idx), num_leaves))
+            .collect();
+
+        let sibling_hashes = futures::future::try_join_all(hash_futures).await?;
 
         Ok(InclusionProof::from_digests(sibling_hashes.iter()))
     }
@@ -562,13 +465,13 @@ where
 
         let idxs = indices_for_consistency_proof(old_size, num_additions);
 
-        let mut proof_hashes = Vec::with_capacity(idxs.len());
-        for &node_idx in &idxs {
-            let hash = self
-                .get_or_compute_hash(InternalIdx::new(node_idx), new_size)
-                .await?;
-            proof_hashes.push(hash);
-        }
+        // Fetch all proof hashes in parallel
+        let hash_futures: Vec<_> = idxs
+            .iter()
+            .map(|&node_idx| self.get_or_compute_hash(InternalIdx::new(node_idx), new_size))
+            .collect();
+
+        let proof_hashes = futures::future::try_join_all(hash_futures).await?;
 
         Ok(ConsistencyProof::from_digests(proof_hashes.iter()))
     }
@@ -605,13 +508,13 @@ where
 
         let idxs = indices_for_consistency_proof(old_size, new_size - old_size);
 
-        let mut proof_hashes = Vec::with_capacity(idxs.len());
-        for &node_idx in &idxs {
-            let hash = self
-                .get_or_compute_hash(InternalIdx::new(node_idx), new_size)
-                .await?;
-            proof_hashes.push(hash);
-        }
+        // Fetch all proof hashes in parallel
+        let hash_futures: Vec<_> = idxs
+            .iter()
+            .map(|&node_idx| self.get_or_compute_hash(InternalIdx::new(node_idx), new_size))
+            .collect();
+
+        let proof_hashes = futures::future::try_join_all(hash_futures).await?;
 
         Ok(ConsistencyProof::from_digests(proof_hashes.iter()))
     }
