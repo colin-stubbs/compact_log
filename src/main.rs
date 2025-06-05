@@ -13,6 +13,7 @@ use slatedb::{
     },
     Db, Settings,
 };
+
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::{default, fs};
@@ -83,6 +84,11 @@ struct CacheConfig {
     root_folder: String,
     max_cache_size_gb: u64,
 }
+
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
