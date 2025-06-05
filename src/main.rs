@@ -266,6 +266,10 @@ async fn initialize_storage(
     db_options.compression_codec = Some(CompressionCodec::Zstd);
 
     let compactor_options: CompactorOptions = CompactorOptions {
+        poll_interval: Duration::from_millis(100),
+        max_sst_size: 64 * 1024 * 1024, // 64 MB
+        max_concurrent_compactions: 4,
+
         ..default::Default::default()
     };
 
