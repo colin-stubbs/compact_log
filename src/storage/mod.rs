@@ -106,8 +106,8 @@ pub struct CtStorage {
 impl BatchConfig {
     pub fn default() -> Self {
         Self {
-            max_batch_size: 1_000,
-            max_batch_timeout_ms: 100,
+            max_batch_size: 500,
+            max_batch_timeout_ms: 50,
         }
     }
 }
@@ -121,8 +121,8 @@ impl CtStorage {
         object_store: Arc<dyn slatedb::object_store::ObjectStore>,
     ) -> Result<Self> {
         // Use a bounded channel to provide backpressure
-        // Channel size is 2x the max batch size to allow some buffering, min 1k.
-        let channel_capacity = (config.max_batch_size * 2).max(2_000);
+        // Channel size is 2x the max batch size to allow some buffering
+        let channel_capacity = (config.max_batch_size * 2).max(20_000);
         let (batch_sender, batch_receiver) = mpsc::channel(channel_capacity);
         let batch_mutex = Arc::new(Mutex::new(()));
 
@@ -232,28 +232,34 @@ impl CtStorage {
         merkle_tree: StorageBackedMerkleTree,
         batch_stats: Arc<Mutex<BatchStats>>,
     ) {
-        tracing::info!("batch_worker: Starting background worker");
+        tracing::trace!("batch_worker: Starting background worker");
         let mut pending_entries = Vec::with_capacity(config.max_batch_size);
         let timeout_duration = std::time::Duration::from_millis(config.max_batch_timeout_ms);
 
         let mut interval = tokio::time::interval(timeout_duration);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        let mut last_entry_time = None::<tokio::time::Instant>;
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
                 entry = batch_receiver.recv() => {
                     match entry {
                         Some(entry) => {
-                            tracing::trace!("batch_worker: Received entry");
+                            tracing::debug!("batch_worker: Received entry");
                             pending_entries.push(entry);
-                            last_entry_time = Some(tokio::time::Instant::now());
+
+                            // After receiving one entry, try to drain more without blocking
+                            while pending_entries.len() < config.max_batch_size {
+                                match batch_receiver.try_recv() {
+                                    Ok(entry) => {
+                                        pending_entries.push(entry);
+                                    }
+                                    Err(_) => break, // Channel empty or closed
+                                }
+                            }
 
                             if pending_entries.len() >= config.max_batch_size {
-                                tracing::trace!("batch_worker: Batch full, flushing {} entries", pending_entries.len());
+                                tracing::trace!("batch_worker: Batch full ({}), flushing {} entries", config.max_batch_size, pending_entries.len());
                                 Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
-                                last_entry_time = None;
                             }
                         }
                         None => {
@@ -268,15 +274,11 @@ impl CtStorage {
                 }
 
                 _ = interval.tick() => {
-                    // Only flush if we have entries and enough time has passed since first entry
+                    // Time-based flush
                     if !pending_entries.is_empty() {
-                        if let Some(entry_time) = last_entry_time {
-                            if entry_time.elapsed() >= timeout_duration {
-                                tracing::trace!("batch_worker: Timeout reached, flushing {} entries", pending_entries.len());
-                                Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
-                                last_entry_time = None;
-                            }
-                        }
+                        tracing::info!("batch_worker: Time flush after {}ms, flushing {} entries",
+                            timeout_duration.as_millis(), pending_entries.len());
+                        Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
                     }
                 }
             }
@@ -465,8 +467,11 @@ impl CtStorage {
         }
 
         tracing::trace!(
-            "flush_batch: All entries notified, took {}ms",
-            flush_time_ms
+            "flush_batch: Flushed {} entries in {}ms (total batches: {}, total time: {}ms)",
+            batch_size,
+            flush_time_ms,
+            stats.batches_flushed,
+            stats.total_flush_time_ms
         );
     }
 
@@ -538,9 +543,13 @@ impl CtStorage {
 
             // Get batch statistics
             let stats = batch_stats.lock().await;
-            let interval_batches = stats.batches_flushed - last_stats.batches_flushed;
-            let interval_entries = stats.total_entries - last_stats.total_entries;
-            let interval_time_ms = stats.total_flush_time_ms - last_stats.total_flush_time_ms;
+            let interval_batches = stats
+                .batches_flushed
+                .saturating_sub(last_stats.batches_flushed);
+            let interval_entries = stats.total_entries.saturating_sub(last_stats.total_entries);
+            let interval_time_ms = stats
+                .total_flush_time_ms
+                .saturating_sub(last_stats.total_flush_time_ms);
 
             if interval_batches > 0 {
                 let avg_batch_size = interval_entries / interval_batches;
