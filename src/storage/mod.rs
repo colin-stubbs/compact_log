@@ -106,7 +106,7 @@ pub struct CtStorage {
 impl BatchConfig {
     pub fn default() -> Self {
         Self {
-            max_batch_size: 10_000,
+            max_batch_size: 1_000,
             max_batch_timeout_ms: 100,
         }
     }
@@ -235,27 +235,25 @@ impl CtStorage {
         tracing::info!("batch_worker: Starting background worker");
         let mut pending_entries = Vec::with_capacity(config.max_batch_size);
         let timeout_duration = std::time::Duration::from_millis(config.max_batch_timeout_ms);
-        let mut timeout = Box::pin(tokio::time::sleep(timeout_duration));
+
+        let mut interval = tokio::time::interval(timeout_duration);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let mut last_entry_time = None::<tokio::time::Instant>;
 
         loop {
             tokio::select! {
                 entry = batch_receiver.recv() => {
                     match entry {
                         Some(entry) => {
-                            let was_empty = pending_entries.is_empty();
                             tracing::trace!("batch_worker: Received entry");
                             pending_entries.push(entry);
-
-                            // If this is the first entry in the batch, reset the timeout
-                            if was_empty {
-                                timeout.as_mut().reset(tokio::time::Instant::now() + timeout_duration);
-                            }
+                            last_entry_time = Some(tokio::time::Instant::now());
 
                             if pending_entries.len() >= config.max_batch_size {
                                 tracing::trace!("batch_worker: Batch full, flushing {} entries", pending_entries.len());
                                 Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
-                                // Reset timeout for next batch
-                                timeout.as_mut().reset(tokio::time::Instant::now() + timeout_duration);
+                                last_entry_time = None;
                             }
                         }
                         None => {
@@ -269,14 +267,17 @@ impl CtStorage {
                     }
                 }
 
-                // Timeout: flush pending entries
-                _ = &mut timeout => {
+                _ = interval.tick() => {
+                    // Only flush if we have entries and enough time has passed since first entry
                     if !pending_entries.is_empty() {
-                        tracing::trace!("batch_worker: Timeout reached, flushing {} entries", pending_entries.len());
-                        Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
+                        if let Some(entry_time) = last_entry_time {
+                            if entry_time.elapsed() >= timeout_duration {
+                                tracing::trace!("batch_worker: Timeout reached, flushing {} entries", pending_entries.len());
+                                Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
+                                last_entry_time = None;
+                            }
+                        }
                     }
-                    // Reset timeout for next batch
-                    timeout.as_mut().reset(tokio::time::Instant::now() + timeout_duration);
                 }
             }
         }
