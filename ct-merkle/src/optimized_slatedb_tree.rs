@@ -246,6 +246,11 @@ where
                 }
             }
 
+            // Yield only on every 4th level to reduce context switching
+            if idx.level() % 4 == 0 {
+                tokio::task::yield_now().await;
+            }
+
             // Otherwise, compute from children
             let left_child = idx.left_child();
             let right_child = idx.right_child(num_leaves);
@@ -344,6 +349,9 @@ where
                     return Ok(digest::Output::<H>::default());
                 }
             }
+
+            // Yield to prevent blocking the runtime during deep recursion
+            tokio::task::yield_now().await;
 
             // Otherwise, compute from children
             let left_child = idx.left_child();
@@ -459,6 +467,9 @@ where
                     return Ok(digest::Output::<H>::default());
                 }
             }
+
+            // Yield to prevent blocking the runtime during deep recursion
+            tokio::task::yield_now().await;
 
             // Otherwise, compute from children
             let left_child = idx.left_child();
