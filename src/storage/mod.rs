@@ -167,8 +167,6 @@ impl CtStorage {
         cert_hash: [u8; 32],
         sct: SignedCertificateTimestamp,
     ) -> Result<u64> {
-        tracing::trace!("add_entry_batched: Starting");
-
         let (completion_tx, completion_rx) = oneshot::channel();
 
         let batch_entry = BatchEntry {
@@ -180,12 +178,7 @@ impl CtStorage {
 
         match self.batch_sender.try_send(batch_entry) {
             Ok(_) => {
-                let queue_len = self.batch_sender.max_capacity() - self.batch_sender.capacity();
-                tracing::debug!(
-                    "add_entry_batched: Sent to batch worker, queue depth: {}/{}",
-                    queue_len,
-                    self.batch_sender.max_capacity()
-                );
+                self.batch_sender.max_capacity() - self.batch_sender.capacity();
             }
             Err(e) => match e {
                 mpsc::error::TrySendError::Full(_) => {
@@ -294,6 +287,7 @@ impl CtStorage {
         merkle_tree: StorageBackedMerkleTree,
         batch_stats: Arc<Mutex<BatchStats>>,
     ) {
+        let now = Instant::now();
         if entries.is_empty() {
             tracing::trace!("flush_batch: No entries to flush");
             return;
@@ -309,6 +303,10 @@ impl CtStorage {
         let mut entry_metadata = Vec::new();
         let mut failed_entries = Vec::new();
 
+        tracing::trace!(
+            "Elapsed time before processing entries: {:?}",
+            start_time.elapsed()
+        );
         for (i, entry) in entries.iter().enumerate() {
             match entry.log_entry.serialize_for_storage() {
                 Ok(entry_data) => {
@@ -325,6 +323,10 @@ impl CtStorage {
                 }
             }
         }
+        tracing::trace!(
+            "Elapsed time after processing entries: {:?}",
+            start_time.elapsed(),
+        );
 
         let push_result = if !leaf_data_vec.is_empty() {
             tracing::trace!(
@@ -389,6 +391,7 @@ impl CtStorage {
                 additional_data.push((cert_sct_key.into_bytes(), sct_data));
             }
 
+            tracing::trace!("Elapsed time before batch push: {:?}", start_time.elapsed());
             match merkle_tree
                 .batch_push_with_data(leaf_data_vec, additional_data)
                 .await
@@ -414,6 +417,7 @@ impl CtStorage {
                 "No valid entries to flush".into(),
             ))
         };
+        tracing::trace!("Elapsed time after batch push: {:?}", start_time.elapsed());
 
         tracing::trace!(
             "flush_batch: Completed with result: {:?}",
@@ -453,6 +457,11 @@ impl CtStorage {
                 }
             }
         }
+
+        tracing::trace!(
+            "Elapsed time after notifying entries: {:?}",
+            start_time.elapsed()
+        );
 
         // Record batch statistics
         let flush_time_ms = start_time.elapsed().as_millis() as u64;
