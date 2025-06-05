@@ -1,4 +1,3 @@
-use bincode::de;
 use config::Config;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::LineEnding;
