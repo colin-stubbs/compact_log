@@ -273,7 +273,7 @@ impl CtStorage {
                         tracing::trace!("batch_worker: Time flush after {}ms, flushing {} entries",
                             timeout_duration.as_millis(), pending_entries.len());
                         Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
-                        tracing::info!("batch_worker: Flushed in {}ms", time.elapsed().as_millis());
+                        tracing::trace!("batch_worker: Flushed in {}ms", time.elapsed().as_millis());
                     }
                 }
             }
