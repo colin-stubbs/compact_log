@@ -107,7 +107,7 @@ impl BatchConfig {
     pub fn default() -> Self {
         Self {
             max_batch_size: 1_000,
-            max_batch_timeout_ms: 50,
+            max_batch_timeout_ms: 600,
         }
     }
 }
