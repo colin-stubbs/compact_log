@@ -6,6 +6,7 @@ use crate::{
 use alloc::{format, string::String, string::ToString, vec::Vec};
 use core::fmt;
 use digest::Digest;
+use futures::future;
 use slatedb::{Db, DbReader, WriteBatch};
 use std::sync::Arc;
 
@@ -322,11 +323,13 @@ where
 
         let idxs = indices_for_consistency_proof(old_size, new_size - old_size);
 
-        let mut proof_hashes = Vec::with_capacity(idxs.len());
-        for &node_idx in &idxs {
-            let hash = self.get_node_hash(InternalIdx::new(node_idx)).await?;
-            proof_hashes.push(hash);
-        }
+        // Fetch all proof hashes in parallel
+        let hash_futures: Vec<_> = idxs
+            .iter()
+            .map(|&node_idx| self.get_node_hash(InternalIdx::new(node_idx)))
+            .collect();
+        
+        let proof_hashes = futures::future::try_join_all(hash_futures).await?;
 
         Ok(ConsistencyProof::from_digests(proof_hashes.iter()))
     }
@@ -455,11 +458,13 @@ where
 
         let idxs = indices_for_inclusion_proof(num_leaves, idx);
 
-        let mut sibling_hashes = Vec::with_capacity(idxs.len());
-        for &node_idx in &idxs {
-            let hash = self.get_node_hash(InternalIdx::new(node_idx)).await?;
-            sibling_hashes.push(hash);
-        }
+        // Fetch all sibling hashes in parallel
+        let hash_futures: Vec<_> = idxs
+            .iter()
+            .map(|&node_idx| self.get_node_hash(InternalIdx::new(node_idx)))
+            .collect();
+        
+        let sibling_hashes = futures::future::try_join_all(hash_futures).await?;
 
         Ok(InclusionProof::from_digests(sibling_hashes.iter()))
     }
@@ -492,11 +497,13 @@ where
 
         let idxs = indices_for_consistency_proof(old_size, num_additions);
 
-        let mut proof_hashes = Vec::with_capacity(idxs.len());
-        for &node_idx in &idxs {
-            let hash = self.get_node_hash(InternalIdx::new(node_idx)).await?;
-            proof_hashes.push(hash);
-        }
+        // Fetch all proof hashes in parallel
+        let hash_futures: Vec<_> = idxs
+            .iter()
+            .map(|&node_idx| self.get_node_hash(InternalIdx::new(node_idx)))
+            .collect();
+        
+        let proof_hashes = futures::future::try_join_all(hash_futures).await?;
 
         Ok(ConsistencyProof::from_digests(proof_hashes.iter()))
     }
