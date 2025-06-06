@@ -1,13 +1,11 @@
 use config::Config;
-use der::oid::db;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::LineEnding;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use p256::SecretKey;
 use serde::{Deserialize, Serialize};
 use slatedb::config::{
-    CompactorOptions, CompressionCodec, ObjectStoreCacheOptions, SstIteratorConfigs,
-    SstIteratorOptions,
+    CompactorOptions, CompressionCodec, ObjectStoreCacheOptions, SstIteratorOptions,
 };
 use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
 use slatedb::{
