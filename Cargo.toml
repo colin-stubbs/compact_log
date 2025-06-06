@@ -5,7 +5,7 @@ edition = "2021"
 description = "A compact log server for storing and serving CT logs."
 
 [dependencies]
-slatedb = { git = "https://github.com/slatedb/slatedb.git", rev = "207715315477d3f73715925fd9599e3667dc7bad", features = [
+slatedb = { git = "https://github.com/slatedb/slatedb.git", rev = "eabc5b645a3c170dd791ddac4b99e9cfb67aa02e", features = [
     "lz4",
     "azure",
 ] }
