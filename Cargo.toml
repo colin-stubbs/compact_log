@@ -6,7 +6,7 @@ description = "A compact log server for storing and serving CT logs."
 
 [dependencies]
 slatedb = { git = "https://github.com/slatedb/slatedb.git", rev = "207715315477d3f73715925fd9599e3667dc7bad", features = [
-    "zstd",
+    "lz4",
     "azure",
 ] }
 num_cpus = "1.17.0"

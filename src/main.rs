@@ -263,13 +263,13 @@ async fn initialize_storage(
     let block_cache = Arc::new(MokaCache::new_with_opts(cache_options));
 
     let mut db_options = Settings::default();
-    db_options.compression_codec = Some(CompressionCodec::Zstd);
+    db_options.compression_codec = Some(CompressionCodec::Lz4);
+    db_options.l0_max_ssts = 64;
 
     let compactor_options: CompactorOptions = CompactorOptions {
         poll_interval: Duration::from_millis(100),
         max_sst_size: 64 * 1024 * 1024, // 64 MB
-        max_concurrent_compactions: 4,
-
+        max_concurrent_compactions: 32,
         ..default::Default::default()
     };
 

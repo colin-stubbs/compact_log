@@ -121,8 +121,7 @@ impl CtStorage {
         object_store: Arc<dyn slatedb::object_store::ObjectStore>,
     ) -> Result<Self> {
         // Use a bounded channel to provide backpressure
-        // Channel size is 2x the max batch size to allow some buffering
-        let channel_capacity = (config.max_batch_size * 2).max(20_000);
+        let channel_capacity = (config.max_batch_size * 2).max(500);
         let (batch_sender, batch_receiver) = mpsc::channel(channel_capacity);
         let batch_mutex = Arc::new(Mutex::new(()));
 
