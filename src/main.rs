@@ -1,10 +1,14 @@
 use config::Config;
+use der::oid::db;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::LineEnding;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use p256::SecretKey;
 use serde::{Deserialize, Serialize};
-use slatedb::config::{CompactorOptions, CompressionCodec, ObjectStoreCacheOptions};
+use slatedb::config::{
+    CompactorOptions, CompressionCodec, ObjectStoreCacheOptions, SstIteratorConfigs,
+    SstIteratorOptions,
+};
 use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
 use slatedb::{
     object_store::{
@@ -258,18 +262,23 @@ async fn initialize_storage(
     storage_config: &StorageConfig,
     cache_config: &Option<CacheConfig>,
 ) -> Result<(Arc<Db>, Path, Arc<dyn ObjectStore>), Box<dyn std::error::Error>> {
-    let cache_options = MokaCacheOptions::default();
+    let mut cache_options = MokaCacheOptions::default();
+    cache_options.max_capacity = 1024 * 1024 * 1024; // 1 GB
 
     let block_cache = Arc::new(MokaCache::new_with_opts(cache_options));
 
     let mut db_options = Settings::default();
-    db_options.compression_codec = Some(CompressionCodec::Lz4);
-    db_options.l0_max_ssts = 64;
+    db_options.compression_codec = Some(CompressionCodec::Zstd);
 
     let compactor_options: CompactorOptions = CompactorOptions {
         poll_interval: Duration::from_millis(100),
-        max_sst_size: 64 * 1024 * 1024, // 64 MB
-        max_concurrent_compactions: 32,
+        max_concurrent_compactions: 16,
+        sst_iterator_options: SstIteratorOptions {
+            max_fetch_tasks: 16,
+            blocks_to_fetch: 2048,
+            cache_blocks: true,
+            eager_spawn: true,
+        },
         ..default::Default::default()
     };
 
