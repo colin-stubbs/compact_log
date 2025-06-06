@@ -6,7 +6,6 @@ use crate::{
 use alloc::{format, string::String, string::ToString, vec::Vec};
 use core::fmt;
 use digest::Digest;
-use futures::future;
 use slatedb::{Db, DbReader, WriteBatch};
 use std::sync::Arc;
 
@@ -328,7 +327,7 @@ where
             .iter()
             .map(|&node_idx| self.get_node_hash(InternalIdx::new(node_idx)))
             .collect();
-        
+
         let proof_hashes = futures::future::try_join_all(hash_futures).await?;
 
         Ok(ConsistencyProof::from_digests(proof_hashes.iter()))
@@ -463,7 +462,7 @@ where
             .iter()
             .map(|&node_idx| self.get_node_hash(InternalIdx::new(node_idx)))
             .collect();
-        
+
         let sibling_hashes = futures::future::try_join_all(hash_futures).await?;
 
         Ok(InclusionProof::from_digests(sibling_hashes.iter()))
@@ -502,7 +501,7 @@ where
             .iter()
             .map(|&node_idx| self.get_node_hash(InternalIdx::new(node_idx)))
             .collect();
-        
+
         let proof_hashes = futures::future::try_join_all(hash_futures).await?;
 
         Ok(ConsistencyProof::from_digests(proof_hashes.iter()))
