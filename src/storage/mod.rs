@@ -286,7 +286,6 @@ impl CtStorage {
         merkle_tree: StorageBackedMerkleTree,
         batch_stats: Arc<Mutex<BatchStats>>,
     ) {
-        let now = Instant::now();
         if entries.is_empty() {
             tracing::trace!("flush_batch: No entries to flush");
             return;
