@@ -177,7 +177,11 @@ impl CtStorage {
 
         match self.batch_sender.try_send(batch_entry) {
             Ok(_) => {
-                self.batch_sender.max_capacity() - self.batch_sender.capacity();
+                tracing::trace!(
+                    "add_entry_batched: Added entry to batch queue, current depth: {}/{}",
+                    self.batch_sender.capacity(),
+                    self.batch_sender.max_capacity()
+                );
             }
             Err(e) => match e {
                 mpsc::error::TrySendError::Full(_) => {
