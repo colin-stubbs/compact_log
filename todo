@@ -1,0 +1,2 @@
+- Fix memory leak
+- Can we share the object store cache between multiple readers?

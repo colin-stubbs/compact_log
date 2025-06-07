@@ -103,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bind_addr = &config.server.bind_addr;
 
-    let (storage, db_path, object_store) =
+    let (storage, _db_path, _object_store) =
         initialize_storage(&config.storage, &config.cache).await?;
 
     // Load keys from config
@@ -129,8 +129,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage,
         batch_config,
         merkle_tree.clone(),
-        db_path.clone(),
-        object_store.clone(),
     )
     .await?;
 
@@ -155,8 +153,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_id,
         private_key_bytes,
         validator,
-        db_path.clone(),
-        object_store.clone(),
     )?;
 
     let app = create_router(api_state);
