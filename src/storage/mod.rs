@@ -106,7 +106,7 @@ pub struct CtStorage {
 impl BatchConfig {
     pub fn default() -> Self {
         Self {
-            max_batch_size: 1000,
+            max_batch_size: 500,
             max_batch_timeout_ms: 500,
         }
     }
