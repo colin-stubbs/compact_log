@@ -353,13 +353,12 @@ pub async fn add_pre_chain(
 pub async fn get_sth(
     State(state): State<Arc<ApiState>>,
 ) -> ApiResult<crate::types::tree_head::SthResponse> {
-    let (tree_size_result, root_result) =
-        tokio::join!(state.merkle_tree.size(), state.merkle_tree.root());
-
-    let tree_size =
-        tree_size_result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
-    let root = root_result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
-    let root_hash = root.as_bytes().to_vec();
+    // Get the committed root (which includes the committed size)
+    let committed_root = state.merkle_tree.committed_root().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
+    
+    let tree_size = committed_root.num_leaves();
+    let root_hash = committed_root.as_bytes().to_vec();
 
     let timestamp = chrono::Utc::now().timestamp_millis() as u64;
     let sth = state

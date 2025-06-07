@@ -42,7 +42,6 @@ impl From<slatedb::SlateDBError> for SlateDbTreeError {
     }
 }
 
-/// Enum to hold either a read-write Db or a read-only DbReader
 pub enum DbHandle {
     ReadWrite(Arc<Db>),
     ReadOnly(Arc<DbReader>),
@@ -96,14 +95,15 @@ where
     _phantom_h: core::marker::PhantomData<H>,
     _phantom_t: core::marker::PhantomData<T>,
     // Cache for frequently accessed upper tree nodes
-    // Key: node index, Value: node hash
-    node_cache: Option<Cache<u64, Vec<u8>>>,
+    // Key: (node index, version), Value: node hash
+    node_cache: Option<Cache<(u64, u64), Vec<u8>>>,
 }
 
 const LEAF_PREFIX: &[u8] = b"leaf:";
-const NODE_PREFIX: &[u8] = b"node:";
 const META_KEY: &[u8] = b"meta";
 const VERSIONED_NODE_PREFIX: &[u8] = b"vnode:";
+const COMMITTED_SIZE_KEY: &[u8] = b"committed_size";
+const NODE_LATEST_VERSION_PREFIX: &[u8] = b"nver:";
 
 impl<H, T> SlateDbBackedTree<H, T>
 where
@@ -111,10 +111,9 @@ where
     T: HashableLeaf + serde::Serialize + serde::de::DeserializeOwned,
 {
     pub async fn new(db: Arc<Db>) -> Result<Self, SlateDbTreeError> {
-        // Create cache with reasonable size, upper tree levels that are frequently accessed
         let cache = Cache::builder()
-            .max_capacity(100_000)
-            .time_to_live(std::time::Duration::from_secs(60 * 5))
+            .max_capacity(5_000_000)
+            .time_to_live(std::time::Duration::from_secs(60 * 30)) // 30 minutes
             .build();
 
         let tree = Self {
@@ -128,6 +127,8 @@ where
 
         if existing_leaves.is_none() {
             tree.set_num_leaves(0).await?;
+            // Also initialize committed size to 0
+            tree.db.put(COMMITTED_SIZE_KEY, &0u64.to_be_bytes()).await?;
         }
 
         Ok(tree)
@@ -151,19 +152,19 @@ where
         key
     }
 
-    fn node_key(index: u64) -> Vec<u8> {
-        let mut key = Vec::with_capacity(NODE_PREFIX.len() + 8);
-        key.extend_from_slice(NODE_PREFIX);
-        key.extend_from_slice(&index.to_be_bytes());
-        key
-    }
-
     fn versioned_node_key(index: u64, version: u64) -> Vec<u8> {
         let mut key = Vec::with_capacity(VERSIONED_NODE_PREFIX.len() + 16);
         key.extend_from_slice(VERSIONED_NODE_PREFIX);
         key.extend_from_slice(&index.to_be_bytes());
         key.push(b'@');
         key.extend_from_slice(&version.to_be_bytes());
+        key
+    }
+
+    fn node_latest_version_key(index: u64) -> Vec<u8> {
+        let mut key = Vec::with_capacity(NODE_LATEST_VERSION_PREFIX.len() + 8);
+        key.extend_from_slice(NODE_LATEST_VERSION_PREFIX);
+        key.extend_from_slice(&index.to_be_bytes());
         key
     }
 
@@ -191,6 +192,23 @@ where
 
     pub async fn is_empty(&self) -> Result<bool, SlateDbTreeError> {
         Ok(self.len().await? == 0)
+    }
+
+    /// Get the last committed tree size (for STH generation)
+    pub async fn get_committed_size(&self) -> Result<u64, SlateDbTreeError> {
+        match self.db.get(COMMITTED_SIZE_KEY).await? {
+            Some(bytes) => {
+                let bytes_ref: &[u8] = bytes.as_ref();
+                let bytes_array: [u8; 8] = bytes_ref.try_into().map_err(|_| {
+                    SlateDbTreeError::EncodingError("Invalid committed size".into())
+                })?;
+                Ok(u64::from_be_bytes(bytes_array))
+            }
+            None => {
+                // If no committed size is stored, use 0 (empty tree)
+                Ok(0)
+            }
+        }
     }
 
     /// Appends multiple items to the tree in a single atomic batch operation.
@@ -239,27 +257,16 @@ where
 
         let mut prefetched_nodes = alloc::collections::BTreeMap::new();
         if !nodes_to_prefetch.is_empty() {
-            let node_keys: Vec<Vec<u8>> = nodes_to_prefetch
+            // Prefetch latest versions for these nodes
+            let futures: Vec<_> = nodes_to_prefetch
                 .iter()
-                .map(|&idx| Self::node_key(idx))
+                .map(|&idx| self.get_node_hash(idx))
                 .collect();
-
-            let futures: Vec<_> = node_keys.iter().map(|key| self.db.get(key)).collect();
 
             let results = futures::future::try_join_all(futures).await?;
 
-            for (&idx, result) in nodes_to_prefetch.iter().zip(results.iter()) {
-                if let Some(bytes) = result {
-                    let mut hash = digest::Output::<H>::default();
-                    if bytes.len() == hash.len() {
-                        hash.copy_from_slice(&bytes);
-                        prefetched_nodes.insert(idx, hash);
-
-                        if let Some(ref cache) = self.node_cache {
-                            cache.insert(idx, bytes.to_vec()).await;
-                        }
-                    }
-                }
+            for (&idx, hash) in nodes_to_prefetch.iter().zip(results.iter()) {
+                prefetched_nodes.insert(idx, hash.clone());
             }
         }
 
@@ -277,12 +284,6 @@ where
 
             let mut cur_idx: InternalIdx = new_leaf_idx.into();
             let leaf_hash = leaf_hash::<H, _>(item);
-            batch.put(&Self::node_key(cur_idx.as_u64()), leaf_hash.as_ref());
-            // Store versioned node for historical queries
-            batch.put(
-                &Self::versioned_node_key(cur_idx.as_u64(), new_num_leaves),
-                leaf_hash.as_ref(),
-            );
             computed_hashes.insert(cur_idx.as_u64(), leaf_hash.clone());
 
             let root_idx = root_idx(new_num_leaves);
@@ -299,20 +300,9 @@ where
                 } else if let Some(hash) = prefetched_nodes.get(&sibling_idx.as_u64()) {
                     hash.clone()
                 } else {
-                    match self.db.get(&Self::node_key(sibling_idx.as_u64())).await? {
-                        Some(bytes) => {
-                            let mut hash = digest::Output::<H>::default();
-                            if bytes.len() == hash.len() {
-                                hash.copy_from_slice(&bytes);
-                                hash
-                            } else {
-                                return Err(SlateDbTreeError::EncodingError(
-                                    "Invalid hash size".into(),
-                                ));
-                            }
-                        }
-                        None => digest::Output::<H>::default(),
-                    }
+                    // Read the node at the version before this batch started
+                    self.get_node_hash_at_version(sibling_idx.as_u64(), starting_index)
+                        .await?
                 };
 
                 let parent_hash = if cur_idx.is_left(new_num_leaves) {
@@ -321,13 +311,6 @@ where
                     parent_hash::<H>(&sibling_hash, &cur_hash)
                 };
 
-                // Store both current version and versioned node
-                batch.put(&Self::node_key(parent_idx.as_u64()), parent_hash.as_ref());
-                // Store versioned node for historical queries
-                batch.put(
-                    &Self::versioned_node_key(parent_idx.as_u64(), new_num_leaves),
-                    parent_hash.as_ref(),
-                );
                 computed_hashes.insert(parent_idx.as_u64(), parent_hash.clone());
 
                 cur_idx = parent_idx;
@@ -337,7 +320,21 @@ where
             current_num_leaves = new_num_leaves;
         }
 
+        // After processing all entries, store versioned nodes for the final tree state
+        let final_tree_size = current_num_leaves;
+        for (node_idx, node_hash) in computed_hashes.iter() {
+            batch.put(
+                &Self::versioned_node_key(*node_idx, final_tree_size),
+                node_hash.as_ref(),
+            );
+            batch.put(
+                &Self::node_latest_version_key(*node_idx),
+                &final_tree_size.to_be_bytes(),
+            );
+        }
+
         batch.put(META_KEY, &current_num_leaves.to_be_bytes());
+        batch.put(COMMITTED_SIZE_KEY, &current_num_leaves.to_be_bytes());
 
         // Add additional key-value pairs to the same batch
         for (key, value) in additional_data {
@@ -368,6 +365,7 @@ where
             .await?;
 
         batch.put(META_KEY, &(num_leaves + 1).to_be_bytes());
+        batch.put(COMMITTED_SIZE_KEY, &(num_leaves + 1).to_be_bytes());
 
         self.db.write(batch).await?;
 
@@ -396,25 +394,49 @@ where
             return Ok(ConsistencyProof::from_digests(std::iter::empty()));
         }
 
-        let current_size = self.len().await?;
+        let current_size = self.get_committed_size().await?;
         if new_size > current_size {
             return Err(SlateDbTreeError::InconsistentState(format!(
-                "New size {} exceeds current tree size {}",
+                "New size {} exceeds current committed tree size {}",
                 new_size, current_size
             )));
         }
 
-        let idxs = indices_for_consistency_proof(old_size, new_size - old_size);
+        // Check if both sizes have versioned nodes
+        let old_root_idx = root_idx(old_size);
+        let new_root_idx = root_idx(new_size);
+        let old_version_check = Self::versioned_node_key(old_root_idx.as_u64(), old_size);
+        let new_version_check = Self::versioned_node_key(new_root_idx.as_u64(), new_size);
 
-        // Fetch all proof hashes in parallel
-        let hash_futures: Vec<_> = idxs
-            .iter()
-            .map(|&node_idx| self.get_node_hash_internal(InternalIdx::new(node_idx)))
-            .collect();
+        let (old_exists, new_exists) = tokio::join!(
+            self.db.get(&old_version_check),
+            self.db.get(&new_version_check)
+        );
 
-        let proof_hashes = futures::future::try_join_all(hash_futures).await?;
+        match (old_exists?, new_exists?) {
+            (Some(_), Some(_)) => {
+                // Both are published STH boundaries
+                let idxs = indices_for_consistency_proof(old_size, new_size - old_size);
 
-        Ok(ConsistencyProof::from_digests(proof_hashes.iter()))
+                // For consistency proofs, we need nodes at the new_size version
+                let hash_futures: Vec<_> = idxs
+                    .iter()
+                    .map(|&node_idx| self.get_node_hash_at_version(node_idx, new_size))
+                    .collect();
+
+                let proof_hashes = futures::future::try_join_all(hash_futures).await?;
+
+                Ok(ConsistencyProof::from_digests(proof_hashes.iter()))
+            }
+            (None, _) => Err(SlateDbTreeError::InconsistentState(format!(
+                "Old tree size {} is not a published STH boundary",
+                old_size
+            ))),
+            (_, None) => Err(SlateDbTreeError::InconsistentState(format!(
+                "New tree size {} is not a published STH boundary",
+                new_size
+            ))),
+        }
     }
 
     /// Recalculates the hashes on the path from `leaf_idx` to the root.
@@ -427,12 +449,6 @@ where
     ) -> Result<(), SlateDbTreeError> {
         let mut cur_idx: InternalIdx = leaf_idx.into();
         let leaf_hash = leaf_hash::<H, _>(leaf_val);
-        batch.put(&Self::node_key(cur_idx.as_u64()), leaf_hash.as_ref());
-        // Store versioned node for historical queries
-        batch.put(
-            &Self::versioned_node_key(cur_idx.as_u64(), num_leaves),
-            leaf_hash.as_ref(),
-        );
 
         let root_idx = root_idx(num_leaves);
 
@@ -456,20 +472,9 @@ where
             let sibling = if let Some(hash) = computed_hashes.get(&sibling_idx.as_u64()) {
                 hash.clone()
             } else {
-                match self.db.get(&Self::node_key(sibling_idx.as_u64())).await? {
-                    Some(bytes) => {
-                        let mut hash = digest::Output::<H>::default();
-                        if bytes.len() == hash.len() {
-                            hash.copy_from_slice(&bytes);
-                            hash
-                        } else {
-                            return Err(SlateDbTreeError::EncodingError(
-                                "Invalid hash size".into(),
-                            ));
-                        }
-                    }
-                    None => digest::Output::<H>::default(),
-                }
+                // Read the node at the version before this single-entry batch
+                self.get_node_hash_at_version(sibling_idx.as_u64(), num_leaves - 1)
+                    .await?
             };
 
             let parent_hash = if cur_idx.is_left(num_leaves) {
@@ -478,43 +483,44 @@ where
                 parent_hash::<H>(&sibling, &cur_node)
             };
 
-            batch.put(&Self::node_key(parent_idx.as_u64()), parent_hash.as_ref());
-            // Store versioned node for historical queries
-            batch.put(
-                &Self::versioned_node_key(parent_idx.as_u64(), num_leaves),
-                parent_hash.as_ref(),
-            );
             computed_hashes.insert(parent_idx.as_u64(), parent_hash);
 
             cur_idx = parent_idx;
+        }
+
+        // Store versioned nodes for the final tree state (single-entry batch)
+        for (node_idx, node_hash) in computed_hashes.iter() {
+            batch.put(
+                &Self::versioned_node_key(*node_idx, num_leaves),
+                node_hash.as_ref(),
+            );
+            batch.put(
+                &Self::node_latest_version_key(*node_idx),
+                &num_leaves.to_be_bytes(),
+            );
         }
 
         Ok(())
     }
 
     pub async fn get_node_hash(&self, idx: u64) -> Result<digest::Output<H>, SlateDbTreeError> {
-        match self.db.get(&Self::node_key(idx)).await? {
-            Some(bytes) => {
-                let mut hash = digest::Output::<H>::default();
-                if bytes.len() == hash.len() {
-                    hash.copy_from_slice(&bytes);
-                    Ok(hash)
-                } else {
-                    Err(SlateDbTreeError::EncodingError("Invalid hash size".into()))
-                }
-            }
-            None => Err(SlateDbTreeError::InconsistentState(format!(
-                "Missing node at index {}",
-                idx
-            ))),
-        }
-    }
+        // Get the latest version for this node
+        match self.db.get(&Self::node_latest_version_key(idx)).await? {
+            Some(version_bytes) => {
+                let version_ref: &[u8] = version_bytes.as_ref();
+                let version_array: [u8; 8] = version_ref.try_into().map_err(|_| {
+                    SlateDbTreeError::EncodingError("Invalid version format".into())
+                })?;
+                let latest_version = u64::from_be_bytes(version_array);
 
-    async fn get_node_hash_internal(
-        &self,
-        idx: InternalIdx,
-    ) -> Result<digest::Output<H>, SlateDbTreeError> {
-        self.get_node_hash(idx.as_u64()).await
+                // Get the versioned node at the latest version
+                self.get_node_hash_at_version(idx, latest_version).await
+            }
+            None => {
+                // No version pointer means this node doesn't exist yet
+                Ok(digest::Output::<H>::default())
+            }
+        }
     }
 
     async fn get_node_hash_at_version(
@@ -522,37 +528,139 @@ where
         idx: u64,
         version: u64,
     ) -> Result<digest::Output<H>, SlateDbTreeError> {
-        // First try to get the versioned node
-        match self.db.get(&Self::versioned_node_key(idx, version)).await? {
-            Some(bytes) => {
+        if let Some(ref cache) = self.node_cache {
+            if let Some(cached_hash) = cache.get(&(idx, version)).await {
                 let mut hash = digest::Output::<H>::default();
-                if bytes.len() == hash.len() {
-                    hash.copy_from_slice(&bytes);
-                    Ok(hash)
+                if cached_hash.len() == hash.len() {
+                    hash.copy_from_slice(&cached_hash);
+                    return Ok(hash);
+                }
+            }
+        }
+
+        let exact_key = Self::versioned_node_key(idx, version);
+        if let Some(bytes) = self.db.get(&exact_key).await? {
+            let mut hash = digest::Output::<H>::default();
+            if bytes.len() == hash.len() {
+                hash.copy_from_slice(&bytes);
+
+                if let Some(ref cache) = self.node_cache {
+                    cache.insert((idx, version), bytes.to_vec()).await;
+                }
+
+                return Ok(hash);
+            } else {
+                return Err(SlateDbTreeError::EncodingError("Invalid hash size".into()));
+            }
+        }
+
+        match self.db.get(&Self::node_latest_version_key(idx)).await? {
+            Some(latest_version_bytes) => {
+                let latest_version_ref: &[u8] = latest_version_bytes.as_ref();
+                let latest_version_array: [u8; 8] =
+                    latest_version_ref.try_into().map_err(|_| {
+                        SlateDbTreeError::EncodingError("Invalid version format".into())
+                    })?;
+                let latest_version = u64::from_be_bytes(latest_version_array);
+
+                if latest_version > version {
+                    // Node was created after the requested version
+                    let default_hash = digest::Output::<H>::default();
+
+                    if let Some(ref cache) = self.node_cache {
+                        cache.insert((idx, version), default_hash.to_vec()).await;
+                    }
+
+                    Ok(default_hash)
                 } else {
-                    Err(SlateDbTreeError::EncodingError("Invalid hash size".into()))
+                    // Node exists at this version, read from its latest version
+                    let versioned_key = Self::versioned_node_key(idx, latest_version);
+                    match self.db.get(&versioned_key).await? {
+                        Some(bytes) => {
+                            let mut hash = digest::Output::<H>::default();
+                            if bytes.len() == hash.len() {
+                                hash.copy_from_slice(&bytes);
+
+                                // Cache the result with the requested version (not latest_version)
+                                if let Some(ref cache) = self.node_cache {
+                                    cache.insert((idx, version), bytes.to_vec()).await;
+                                }
+
+                                Ok(hash)
+                            } else {
+                                Err(SlateDbTreeError::EncodingError("Invalid hash size".into()))
+                            }
+                        }
+                        None => {
+                            // This shouldn't happen if latest_version pointer is correct
+                            Err(SlateDbTreeError::InconsistentState(format!(
+                                "Node {} has latest version {} but no data",
+                                idx, latest_version
+                            )))
+                        }
+                    }
                 }
             }
             None => {
-                // If versioned node doesn't exist, it means the node hasn't changed since that version
-                // Fall back to the current node value
-                self.get_node_hash(idx).await
+                // No latest version pointer means node doesn't exist at all
+                let default_hash = digest::Output::<H>::default();
+
+                // Cache the default result
+                if let Some(ref cache) = self.node_cache {
+                    cache.insert((idx, version), default_hash.to_vec()).await;
+                }
+
+                Ok(default_hash)
             }
         }
     }
 
-    /// Returns the root hash of this tree.
+    /// Returns the root hash of this tree at the committed size.
     pub async fn root(&self) -> Result<RootHash<H>, SlateDbTreeError> {
-        let num_leaves = self.len().await?;
+        let num_leaves = self.get_committed_size().await?;
 
         let root_hash = if num_leaves == 0 {
             H::digest(b"")
         } else {
             let root_idx = root_idx(num_leaves);
-            self.get_node_hash_internal(root_idx).await?
+            self.get_node_hash_at_version(root_idx.as_u64(), num_leaves)
+                .await?
         };
 
         Ok(RootHash::new(root_hash, num_leaves))
+    }
+
+    /// Returns the root hash at a specific tree size (for committed STH)
+    pub async fn root_at_size(&self, tree_size: u64) -> Result<RootHash<H>, SlateDbTreeError> {
+        if tree_size == 0 {
+            return Ok(RootHash::new(H::digest(b""), 0));
+        }
+
+        let current_size = self.get_committed_size().await?;
+        if tree_size > current_size {
+            return Err(SlateDbTreeError::InconsistentState(format!(
+                "Requested tree size {} exceeds current committed tree size {}",
+                tree_size, current_size
+            )));
+        }
+
+        let root_idx = root_idx(tree_size);
+
+        // Check if this is a published STH boundary
+        let version_check_key = Self::versioned_node_key(root_idx.as_u64(), tree_size);
+        if self.db.get(&version_check_key).await?.is_none() {
+            return Err(SlateDbTreeError::InconsistentState(format!(
+                "Tree size {} is not a published STH boundary",
+                tree_size
+            )));
+        }
+
+        // Get the root hash for this STH
+        let root_hash = self
+            .get_node_hash_at_version(root_idx.as_u64(), tree_size)
+            .await?;
+
+        Ok(RootHash::new(root_hash, tree_size))
     }
 
     pub async fn get(&self, idx: u64) -> Result<Option<T>, SlateDbTreeError> {
@@ -571,7 +679,7 @@ where
     /// # Errors
     /// Returns an error if the index is out of bounds or if there's a database error.
     pub async fn prove_inclusion(&self, idx: u64) -> Result<InclusionProof<H>, SlateDbTreeError> {
-        let num_leaves = self.len().await?;
+        let num_leaves = self.get_committed_size().await?;
 
         if idx >= num_leaves {
             return Err(SlateDbTreeError::InconsistentState(format!(
@@ -580,17 +688,7 @@ where
             )));
         }
 
-        let idxs = indices_for_inclusion_proof(num_leaves, idx);
-
-        // Fetch all sibling hashes in parallel
-        let hash_futures: Vec<_> = idxs
-            .iter()
-            .map(|&node_idx| self.get_node_hash_internal(InternalIdx::new(node_idx)))
-            .collect();
-
-        let sibling_hashes = futures::future::try_join_all(hash_futures).await?;
-
-        Ok(InclusionProof::from_digests(sibling_hashes.iter()))
+        self.prove_inclusion_at_size(idx, num_leaves).await
     }
 
     /// Returns a proof of inclusion of the item at the given index for a specific tree size.
@@ -602,11 +700,11 @@ where
         idx: u64,
         tree_size: u64,
     ) -> Result<InclusionProof<H>, SlateDbTreeError> {
-        let current_leaves = self.len().await?;
+        let current_leaves = self.get_committed_size().await?;
 
         if tree_size > current_leaves {
             return Err(SlateDbTreeError::InconsistentState(format!(
-                "Requested tree size {} exceeds current tree size {}",
+                "Requested tree size {} exceeds current committed tree size {}",
                 tree_size, current_leaves
             )));
         }
@@ -618,17 +716,34 @@ where
             )));
         }
 
-        let idxs = indices_for_inclusion_proof(tree_size, idx);
+        // Check if we have versioned nodes for this tree size
+        // The root node is always stored for each batch
+        let root_idx = root_idx(tree_size);
+        let version_check_key = Self::versioned_node_key(root_idx.as_u64(), tree_size);
 
-        // Fetch all sibling hashes in parallel - using versioned nodes
-        let hash_futures: Vec<_> = idxs
-            .iter()
-            .map(|&node_idx| self.get_node_hash_at_version(node_idx, tree_size))
-            .collect();
+        match self.db.get(&version_check_key).await? {
+            Some(_) => {
+                // We have versioned nodes for this tree size (published STH)
+                let idxs = indices_for_inclusion_proof(tree_size, idx);
 
-        let sibling_hashes = futures::future::try_join_all(hash_futures).await?;
+                let hash_futures: Vec<_> = idxs
+                    .iter()
+                    .map(|&node_idx| self.get_node_hash_at_version(node_idx, tree_size))
+                    .collect();
 
-        Ok(InclusionProof::from_digests(sibling_hashes.iter()))
+                let sibling_hashes = futures::future::try_join_all(hash_futures).await?;
+
+                Ok(InclusionProof::from_digests(sibling_hashes.iter()))
+            }
+            None => {
+                // No versioned nodes for this tree size - not a published STH
+                // This is the correct behavior per RFC 6962
+                Err(SlateDbTreeError::InconsistentState(format!(
+                    "Tree size {} is not a published STH boundary",
+                    tree_size
+                )))
+            }
+        }
     }
 
     /// Produces a proof that a tree with `old_size` leaves is a prefix of this tree.
@@ -640,7 +755,7 @@ where
         &self,
         old_size: u64,
     ) -> Result<ConsistencyProof<H>, SlateDbTreeError> {
-        let new_size = self.len().await?;
+        let new_size = self.get_committed_size().await?;
 
         if old_size == 0 {
             return Err(SlateDbTreeError::InconsistentState(
@@ -648,26 +763,8 @@ where
             ));
         }
 
-        if old_size >= new_size {
-            return Err(SlateDbTreeError::InconsistentState(format!(
-                "Old size {} must be less than current size {}",
-                old_size, new_size
-            )));
-        }
-
-        let num_additions = new_size - old_size;
-
-        let idxs = indices_for_consistency_proof(old_size, num_additions);
-
-        // Fetch all proof hashes in parallel
-        let hash_futures: Vec<_> = idxs
-            .iter()
-            .map(|&node_idx| self.get_node_hash_internal(InternalIdx::new(node_idx)))
-            .collect();
-
-        let proof_hashes = futures::future::try_join_all(hash_futures).await?;
-
-        Ok(ConsistencyProof::from_digests(proof_hashes.iter()))
+        // Use prove_consistency_between with committed size to ensure consistency
+        self.prove_consistency_between(old_size, new_size).await
     }
 }
 

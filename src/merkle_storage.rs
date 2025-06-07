@@ -56,11 +56,20 @@ impl StorageBackedMerkleTree {
         })
     }
 
-
     pub async fn size(&self) -> Result<u64> {
         self.tree.len().await.map_err(|e| {
             CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
                 "Failed to get tree size: {:?}",
+                e
+            )))
+        })
+    }
+
+    /// Get the last committed tree size (for STH generation)
+    pub async fn committed_size(&self) -> Result<u64> {
+        self.tree.get_committed_size().await.map_err(|e| {
+            CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
+                "Failed to get committed tree size: {:?}",
                 e
             )))
         })
@@ -86,10 +95,12 @@ impl StorageBackedMerkleTree {
             })
     }
 
-    pub async fn root(&self) -> Result<RootHash<Sha256>> {
-        self.tree.root().await.map_err(|e| {
+    /// Get the root at the committed tree size (for STH generation)
+    pub async fn committed_root(&self) -> Result<RootHash<Sha256>> {
+        let committed_size = self.committed_size().await?;
+        self.tree.root_at_size(committed_size).await.map_err(|e| {
             CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
-                "Failed to get root: {:?}",
+                "Failed to get root at committed size: {:?}",
                 e
             )))
         })
@@ -115,13 +126,24 @@ impl StorageBackedMerkleTree {
             )));
         }
 
-        // Use the new prove_inclusion_at_size method that handles the correct tree size
-        let proof = self.tree.prove_inclusion_at_size(leaf_index, tree_size).await.map_err(|e| {
-            CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
-                "Failed to prove inclusion: {:?}",
-                e
-            )))
-        })?;
+        let proof = self
+            .tree
+            .prove_inclusion_at_size(leaf_index, tree_size)
+            .await
+            .map_err(|e| {
+                let error_str = format!("{:?}", e);
+                if error_str.contains("not a published STH boundary") {
+                    CtError::BadRequest(format!(
+                        "Tree size {} is not a published STH boundary",
+                        tree_size
+                    ))
+                } else {
+                    CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
+                        "Failed to prove inclusion: {:?}",
+                        e
+                    )))
+                }
+            })?;
 
         Ok(proof)
     }
@@ -166,10 +188,15 @@ impl StorageBackedMerkleTree {
             .prove_consistency_between(old_tree_size, new_tree_size)
             .await
             .map_err(|e| {
-                CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
-                    "Failed to prove consistency: {:?}",
-                    e
-                )))
+                let error_str = format!("{:?}", e);
+                if error_str.contains("not a published STH boundary") {
+                    CtError::BadRequest(error_str)
+                } else {
+                    CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
+                        "Failed to prove consistency: {:?}",
+                        e
+                    )))
+                }
             })?;
 
         Ok(proof)
