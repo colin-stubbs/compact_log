@@ -25,6 +25,7 @@ use tracing::info;
 
 mod api;
 mod merkle_storage;
+mod merkle_tree;
 mod storage;
 mod types;
 mod validation;

@@ -1,6 +1,6 @@
 use crate::types::{CtError, Result};
-use ct_merkle::{
-    slatedb_backed_tree::SlateDbBackedTree, ConsistencyProof, InclusionProof, RootHash,
+use crate::merkle_tree::{
+    SlateDbBackedTree, ConsistencyProof, InclusionProof, RootHash,
 };
 use sha2::Sha256;
 use slatedb::Db;

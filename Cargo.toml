@@ -14,7 +14,6 @@ slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "98d265b9734f09c
 ] }
 num_cpus = "1.17.0"
 bincode = { version = "2.0", features = ["std", "serde"] }
-ct-merkle = { path = "./ct-merkle", features = ["std", "serde", "slatedb"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
 serde = { version = "1", features = ["derive"] }
@@ -39,3 +38,9 @@ toml = "0.8"
 config = "0.14"
 rand = "0.8"
 mimalloc = "0.1"
+subtle = "2.5"
+futures = "0.3"
+moka = { version = "0.12", features = ["future"] }
+
+[dev-dependencies]
+subtle = "2.5"
