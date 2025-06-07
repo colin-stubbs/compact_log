@@ -31,11 +31,11 @@ CompactLog makes three fundamental design choices that differentiate it from oth
 
 Many CT log implementations have a Maximum Merge Delay - a window where submitted certificates aren't yet included in the Merkle tree. This exists because:
 
-- Some implementations have expensive tree update operations
-- Background signers batch updates for efficiency
-- Consistency requires coordinating distributed components
+- Some implementations have expensive tree update operations.
+- Background signers batch updates for efficiency.
+- Consistency requires coordinating distributed components.
 
-CompactLog eliminates MMD through **immediate consistency with intelligent batching**:
+CompactLog eliminates MMD through immediate consistency with intelligent batching:
 
 ```
 Submission 1 ─┐
@@ -52,9 +52,9 @@ The batching system:
 
 This achieves both efficiency and immediate consistency because:
 
-1. STH-boundary versioning makes batch updates cheap (only final state stored)
-2. Synchronous batching eliminates the separate "merge" phase
-3. Bounded latency - max 500ms wait, but often less with high traffic
+1. STH-boundary versioning makes batch updates cheap (only final state stored).
+2. Synchronous batching eliminates the separate "merge" phase.
+3. Bounded latency - max 500ms wait, but often less with high traffic.
 
 ### STH-Boundary Versioning
 
@@ -91,10 +91,10 @@ hash:{leaf_hash} → tree index
 
 Every operation maintains strict consistency:
 
-- Reads see the latest committed STH state
-- Writes are serialized through async locking
-- Proofs only available at STH boundaries (ensuring stable references)
-- No eventual consistency - all operations are immediately visible
+- Reads see the latest committed STH state.
+- Writes are serialized through async locking.
+- Proofs only available at STH boundaries (ensuring stable references).
+- No eventual consistency - all operations are immediately visible.
 
 
 ## Configuration

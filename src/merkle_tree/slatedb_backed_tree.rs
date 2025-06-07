@@ -2229,7 +2229,7 @@ mod tests {
             .unwrap();
 
         let root = tree.root().await.unwrap();
-        let valid_proof = tree.prove_inclusion(0).await.unwrap();
+        let _valid_proof = tree.prove_inclusion(0).await.unwrap();
 
         // Create malformed proofs
 
