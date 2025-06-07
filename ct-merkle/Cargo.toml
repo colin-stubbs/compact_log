@@ -27,6 +27,7 @@ tokio = { version = "1", features = ["rt", "macros"], optional = true }
 sha2 = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }
 futures = { version = "0.3", optional = true }
+moka = { version = "0.12", optional = true, features = ["future"] }
 
 [features]
 default = []
@@ -39,6 +40,7 @@ slatedb = [
     "dep:sha2",
     "dep:hex",
     "dep:futures",
+    "dep:moka",
     "std",
     "serde",
 ]

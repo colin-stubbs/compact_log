@@ -528,6 +528,7 @@ dependencies = [
  "futures",
  "generic-array",
  "hex",
+ "moka",
  "serde",
  "sha2",
  "slatedb",

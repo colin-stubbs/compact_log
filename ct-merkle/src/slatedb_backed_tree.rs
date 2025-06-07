@@ -6,6 +6,7 @@ use crate::{
 use alloc::{format, string::String, string::ToString, vec::Vec};
 use core::fmt;
 use digest::Digest;
+use moka::future::Cache;
 use slatedb::{Db, DbReader, WriteBatch};
 use std::sync::Arc;
 
@@ -94,6 +95,9 @@ where
     db: DbHandle,
     _phantom_h: core::marker::PhantomData<H>,
     _phantom_t: core::marker::PhantomData<T>,
+    // Cache for frequently accessed upper tree nodes
+    // Key: node index, Value: node hash
+    node_cache: Option<Cache<u64, Vec<u8>>>,
 }
 
 const LEAF_PREFIX: &[u8] = b"leaf:";
@@ -106,10 +110,17 @@ where
     T: HashableLeaf + serde::Serialize + serde::de::DeserializeOwned,
 {
     pub async fn new(db: Arc<Db>) -> Result<Self, SlateDbTreeError> {
+        // Create cache with reasonable size, upper tree levels that are frequently accessed
+        let cache = Cache::builder()
+            .max_capacity(100_000)
+            .time_to_live(std::time::Duration::from_secs(60 * 5))
+            .build();
+
         let tree = Self {
             db: DbHandle::ReadWrite(db),
             _phantom_h: core::marker::PhantomData,
             _phantom_t: core::marker::PhantomData,
+            node_cache: Some(cache),
         };
 
         let existing_leaves = tree.get_num_leaves().await?;
@@ -126,6 +137,7 @@ where
             db: DbHandle::ReadOnly(reader),
             _phantom_h: core::marker::PhantomData,
             _phantom_t: core::marker::PhantomData,
+            node_cache: None, // No cache for read-only instances
         };
 
         Ok(tree)
@@ -191,9 +203,58 @@ where
             return Ok(starting_index);
         }
 
+        // Pre-fetch nodes that exist in the original tree
+        let mut nodes_to_prefetch = alloc::collections::BTreeSet::new();
+
+        // Calculate which nodes we'll need that exist in the original tree
+        for i in 0..items.len() {
+            let leaf_position = starting_index + i as u64;
+            let new_leaf_idx = LeafIdx::new(leaf_position);
+            let tree_size_when_processing = leaf_position + 1;
+
+            let mut cur_idx: InternalIdx = new_leaf_idx.into();
+            let root_idx = root_idx(tree_size_when_processing);
+
+            while cur_idx != root_idx {
+                let sibling_idx = cur_idx.sibling(tree_size_when_processing);
+
+                // Only prefetch siblings that exist in the original tree
+                if sibling_idx.as_u64() < starting_index * 2 {
+                    nodes_to_prefetch.insert(sibling_idx.as_u64());
+                }
+
+                cur_idx = cur_idx.parent(tree_size_when_processing);
+            }
+        }
+
+        let mut prefetched_nodes = alloc::collections::BTreeMap::new();
+        if !nodes_to_prefetch.is_empty() {
+            let node_keys: Vec<Vec<u8>> = nodes_to_prefetch
+                .iter()
+                .map(|&idx| Self::node_key(idx))
+                .collect();
+
+            let futures: Vec<_> = node_keys.iter().map(|key| self.db.get(key)).collect();
+
+            let results = futures::future::try_join_all(futures).await?;
+
+            for (&idx, result) in nodes_to_prefetch.iter().zip(results.iter()) {
+                if let Some(bytes) = result {
+                    let mut hash = digest::Output::<H>::default();
+                    if bytes.len() == hash.len() {
+                        hash.copy_from_slice(&bytes);
+                        prefetched_nodes.insert(idx, hash);
+
+                        if let Some(ref cache) = self.node_cache {
+                            cache.insert(idx, bytes.to_vec()).await;
+                        }
+                    }
+                }
+            }
+        }
+
         let mut batch = WriteBatch::new();
         let mut current_num_leaves = starting_index;
-
         let mut computed_hashes = alloc::collections::BTreeMap::<u64, digest::Output<H>>::new();
 
         for item in items.iter() {
@@ -220,6 +281,8 @@ where
                     hash.clone()
                 } else if sibling_idx.as_u64() >= current_num_leaves * 2 {
                     digest::Output::<H>::default()
+                } else if let Some(hash) = prefetched_nodes.get(&sibling_idx.as_u64()) {
+                    hash.clone()
                 } else {
                     match self.db.get(&Self::node_key(sibling_idx.as_u64())).await? {
                         Some(bytes) => {
