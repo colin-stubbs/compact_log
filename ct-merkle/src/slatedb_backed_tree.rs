@@ -388,7 +388,7 @@ where
         // Fetch all proof hashes in parallel
         let hash_futures: Vec<_> = idxs
             .iter()
-            .map(|&node_idx| self.get_node_hash(InternalIdx::new(node_idx)))
+            .map(|&node_idx| self.get_node_hash_internal(InternalIdx::new(node_idx)))
             .collect();
 
         let proof_hashes = futures::future::try_join_all(hash_futures).await?;
@@ -461,8 +461,8 @@ where
         Ok(())
     }
 
-    async fn get_node_hash(&self, idx: InternalIdx) -> Result<digest::Output<H>, SlateDbTreeError> {
-        match self.db.get(&Self::node_key(idx.as_u64())).await? {
+    pub async fn get_node_hash(&self, idx: u64) -> Result<digest::Output<H>, SlateDbTreeError> {
+        match self.db.get(&Self::node_key(idx)).await? {
             Some(bytes) => {
                 let mut hash = digest::Output::<H>::default();
                 if bytes.len() == hash.len() {
@@ -474,9 +474,13 @@ where
             }
             None => Err(SlateDbTreeError::InconsistentState(format!(
                 "Missing node at index {}",
-                idx.as_u64()
+                idx
             ))),
         }
+    }
+
+    async fn get_node_hash_internal(&self, idx: InternalIdx) -> Result<digest::Output<H>, SlateDbTreeError> {
+        self.get_node_hash(idx.as_u64()).await
     }
 
     /// Returns the root hash of this tree.
@@ -487,7 +491,7 @@ where
             H::digest(b"")
         } else {
             let root_idx = root_idx(num_leaves);
-            self.get_node_hash(root_idx).await?
+            self.get_node_hash_internal(root_idx).await?
         };
 
         Ok(RootHash::new(root_hash, num_leaves))
@@ -523,7 +527,45 @@ where
         // Fetch all sibling hashes in parallel
         let hash_futures: Vec<_> = idxs
             .iter()
-            .map(|&node_idx| self.get_node_hash(InternalIdx::new(node_idx)))
+            .map(|&node_idx| self.get_node_hash_internal(InternalIdx::new(node_idx)))
+            .collect();
+
+        let sibling_hashes = futures::future::try_join_all(hash_futures).await?;
+
+        Ok(InclusionProof::from_digests(sibling_hashes.iter()))
+    }
+
+    /// Returns a proof of inclusion of the item at the given index for a specific tree size.
+    ///
+    /// # Errors
+    /// Returns an error if the index is out of bounds, tree_size is invalid, or if there's a database error.
+    pub async fn prove_inclusion_at_size(
+        &self,
+        idx: u64,
+        tree_size: u64,
+    ) -> Result<InclusionProof<H>, SlateDbTreeError> {
+        let current_leaves = self.len().await?;
+
+        if tree_size > current_leaves {
+            return Err(SlateDbTreeError::InconsistentState(format!(
+                "Requested tree size {} exceeds current tree size {}",
+                tree_size, current_leaves
+            )));
+        }
+
+        if idx >= tree_size {
+            return Err(SlateDbTreeError::InconsistentState(format!(
+                "Index {} out of bounds for requested tree size {}",
+                idx, tree_size
+            )));
+        }
+
+        let idxs = indices_for_inclusion_proof(tree_size, idx);
+
+        // Fetch all sibling hashes in parallel
+        let hash_futures: Vec<_> = idxs
+            .iter()
+            .map(|&node_idx| self.get_node_hash_internal(InternalIdx::new(node_idx)))
             .collect();
 
         let sibling_hashes = futures::future::try_join_all(hash_futures).await?;
@@ -562,7 +604,7 @@ where
         // Fetch all proof hashes in parallel
         let hash_futures: Vec<_> = idxs
             .iter()
-            .map(|&node_idx| self.get_node_hash(InternalIdx::new(node_idx)))
+            .map(|&node_idx| self.get_node_hash_internal(InternalIdx::new(node_idx)))
             .collect();
 
         let proof_hashes = futures::future::try_join_all(hash_futures).await?;

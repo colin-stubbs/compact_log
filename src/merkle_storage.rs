@@ -149,7 +149,8 @@ impl StorageBackedMerkleTree {
             )));
         }
 
-        let proof = self.tree.prove_inclusion(leaf_index).await.map_err(|e| {
+        // Use the new prove_inclusion_at_size method that handles the correct tree size
+        let proof = self.tree.prove_inclusion_at_size(leaf_index, tree_size).await.map_err(|e| {
             CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
                 "Failed to prove inclusion: {:?}",
                 e

@@ -441,6 +441,41 @@ where
         Ok(InclusionProof::from_digests(sibling_hashes.iter()))
     }
 
+    /// Returns a proof of inclusion of the item at the given index for a specific tree size.
+    pub async fn prove_inclusion_at_size(
+        &self,
+        idx: u64,
+        tree_size: u64,
+    ) -> Result<InclusionProof<H>, OptimizedSlateDbTreeError> {
+        let current_leaves = self.len().await?;
+
+        if tree_size > current_leaves {
+            return Err(OptimizedSlateDbTreeError::InconsistentState(format!(
+                "Requested tree size {} exceeds current tree size {}",
+                tree_size, current_leaves
+            )));
+        }
+
+        if idx >= tree_size {
+            return Err(OptimizedSlateDbTreeError::InconsistentState(format!(
+                "Index {} out of bounds for requested tree size {}",
+                idx, tree_size
+            )));
+        }
+
+        let idxs = indices_for_inclusion_proof(tree_size, idx);
+
+        // Fetch all sibling hashes in parallel
+        let hash_futures: Vec<_> = idxs
+            .iter()
+            .map(|&node_idx| self.get_or_compute_hash(InternalIdx::new(node_idx), tree_size))
+            .collect();
+
+        let sibling_hashes = futures::future::try_join_all(hash_futures).await?;
+
+        Ok(InclusionProof::from_digests(sibling_hashes.iter()))
+    }
+
     /// Produces a proof that a tree with `old_size` leaves is a prefix of this tree.
     pub async fn prove_consistency(
         &self,
