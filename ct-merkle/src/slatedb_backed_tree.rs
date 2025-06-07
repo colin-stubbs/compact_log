@@ -103,6 +103,7 @@ where
 const LEAF_PREFIX: &[u8] = b"leaf:";
 const NODE_PREFIX: &[u8] = b"node:";
 const META_KEY: &[u8] = b"meta";
+const VERSIONED_NODE_PREFIX: &[u8] = b"vnode:";
 
 impl<H, T> SlateDbBackedTree<H, T>
 where
@@ -154,6 +155,15 @@ where
         let mut key = Vec::with_capacity(NODE_PREFIX.len() + 8);
         key.extend_from_slice(NODE_PREFIX);
         key.extend_from_slice(&index.to_be_bytes());
+        key
+    }
+
+    fn versioned_node_key(index: u64, version: u64) -> Vec<u8> {
+        let mut key = Vec::with_capacity(VERSIONED_NODE_PREFIX.len() + 16);
+        key.extend_from_slice(VERSIONED_NODE_PREFIX);
+        key.extend_from_slice(&index.to_be_bytes());
+        key.push(b'@');
+        key.extend_from_slice(&version.to_be_bytes());
         key
     }
 
@@ -268,6 +278,11 @@ where
             let mut cur_idx: InternalIdx = new_leaf_idx.into();
             let leaf_hash = leaf_hash::<H, _>(item);
             batch.put(&Self::node_key(cur_idx.as_u64()), leaf_hash.as_ref());
+            // Store versioned node for historical queries
+            batch.put(
+                &Self::versioned_node_key(cur_idx.as_u64(), new_num_leaves),
+                leaf_hash.as_ref(),
+            );
             computed_hashes.insert(cur_idx.as_u64(), leaf_hash.clone());
 
             let root_idx = root_idx(new_num_leaves);
@@ -306,7 +321,13 @@ where
                     parent_hash::<H>(&sibling_hash, &cur_hash)
                 };
 
+                // Store both current version and versioned node
                 batch.put(&Self::node_key(parent_idx.as_u64()), parent_hash.as_ref());
+                // Store versioned node for historical queries
+                batch.put(
+                    &Self::versioned_node_key(parent_idx.as_u64(), new_num_leaves),
+                    parent_hash.as_ref(),
+                );
                 computed_hashes.insert(parent_idx.as_u64(), parent_hash.clone());
 
                 cur_idx = parent_idx;
@@ -407,6 +428,11 @@ where
         let mut cur_idx: InternalIdx = leaf_idx.into();
         let leaf_hash = leaf_hash::<H, _>(leaf_val);
         batch.put(&Self::node_key(cur_idx.as_u64()), leaf_hash.as_ref());
+        // Store versioned node for historical queries
+        batch.put(
+            &Self::versioned_node_key(cur_idx.as_u64(), num_leaves),
+            leaf_hash.as_ref(),
+        );
 
         let root_idx = root_idx(num_leaves);
 
@@ -453,6 +479,11 @@ where
             };
 
             batch.put(&Self::node_key(parent_idx.as_u64()), parent_hash.as_ref());
+            // Store versioned node for historical queries
+            batch.put(
+                &Self::versioned_node_key(parent_idx.as_u64(), num_leaves),
+                parent_hash.as_ref(),
+            );
             computed_hashes.insert(parent_idx.as_u64(), parent_hash);
 
             cur_idx = parent_idx;
@@ -479,8 +510,35 @@ where
         }
     }
 
-    async fn get_node_hash_internal(&self, idx: InternalIdx) -> Result<digest::Output<H>, SlateDbTreeError> {
+    async fn get_node_hash_internal(
+        &self,
+        idx: InternalIdx,
+    ) -> Result<digest::Output<H>, SlateDbTreeError> {
         self.get_node_hash(idx.as_u64()).await
+    }
+
+    async fn get_node_hash_at_version(
+        &self,
+        idx: u64,
+        version: u64,
+    ) -> Result<digest::Output<H>, SlateDbTreeError> {
+        // First try to get the versioned node
+        match self.db.get(&Self::versioned_node_key(idx, version)).await? {
+            Some(bytes) => {
+                let mut hash = digest::Output::<H>::default();
+                if bytes.len() == hash.len() {
+                    hash.copy_from_slice(&bytes);
+                    Ok(hash)
+                } else {
+                    Err(SlateDbTreeError::EncodingError("Invalid hash size".into()))
+                }
+            }
+            None => {
+                // If versioned node doesn't exist, it means the node hasn't changed since that version
+                // Fall back to the current node value
+                self.get_node_hash(idx).await
+            }
+        }
     }
 
     /// Returns the root hash of this tree.
@@ -562,10 +620,10 @@ where
 
         let idxs = indices_for_inclusion_proof(tree_size, idx);
 
-        // Fetch all sibling hashes in parallel
+        // Fetch all sibling hashes in parallel - using versioned nodes
         let hash_futures: Vec<_> = idxs
             .iter()
-            .map(|&node_idx| self.get_node_hash_internal(InternalIdx::new(node_idx)))
+            .map(|&node_idx| self.get_node_hash_at_version(node_idx, tree_size))
             .collect();
 
         let sibling_hashes = futures::future::try_join_all(hash_futures).await?;
