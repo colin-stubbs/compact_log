@@ -258,21 +258,17 @@ async fn initialize_storage(
 
     let block_cache = Arc::new(MokaCache::new_with_opts(cache_options));
 
+    let garbage_collector_directory_options = GarbageCollectorDirectoryOptions {
+        min_age: Duration::from_secs(60 * 60),
+        ..default::Default::default()
+    };
+
     let mut db_options = Settings::default();
     db_options.compression_codec = Some(CompressionCodec::Lz4);
     db_options.garbage_collector_options = Some(GarbageCollectorOptions {
-        wal_options: Some(GarbageCollectorDirectoryOptions {
-            interval: Some(Duration::from_secs(60)),
-            min_age: Duration::from_secs(60),
-        }),
-        manifest_options: Some(GarbageCollectorDirectoryOptions {
-            interval: Some(Duration::from_secs(60)),
-            min_age: Duration::from_secs(60),
-        }),
-        compacted_options: Some(GarbageCollectorDirectoryOptions {
-            interval: Some(Duration::from_secs(60)),
-            min_age: Duration::from_secs(60),
-        }),
+        wal_options: Some(garbage_collector_directory_options),
+        manifest_options: Some(garbage_collector_directory_options),
+        compacted_options: Some(garbage_collector_directory_options),
         ..default::Default::default()
     });
 
