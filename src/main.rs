@@ -259,7 +259,7 @@ async fn initialize_storage(
 
     let mut db_options = Settings::default();
     db_options.compression_codec = Some(CompressionCodec::Zstd);
-    db_options.block_size = 128 * 1024; // 128 KB
+    db_options.block_size = 64 * 1024; // 64 KB
 
     let compactor_options: CompactorOptions = CompactorOptions {
         poll_interval: Duration::from_millis(100),
