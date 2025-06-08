@@ -9,7 +9,7 @@ debug = true
 
 [dependencies]
 slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "3635d74448a7d9e83a2b41b76fe2e42915d397e7", features = [
-    "zstd",
+    "lz4",
     "azure",
 ] }
 num_cpus = "1.17.0"
