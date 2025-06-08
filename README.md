@@ -26,17 +26,17 @@ CompactLog makes three fundamental design choices that differentiate it from oth
 
 1. **LSM-tree storage via SlateDB** instead of relational databases or custom storage engines.
 2. **STH-boundary versioning** - only persisting tree state at published checkpoints.
-3. **Synchronous tree updates** - eliminating the Maximum Merge Delay (MMD) entirely.
+3. **Synchronous tree updates** - achieving a Maximum Merge Delay (MMD) of 0 seconds.
 
-### How MMD is Eliminated Entirely
+### How MMD is Set to Zero
 
-Many CT log implementations have a Maximum Merge Delay, where submitted certificates aren't yet included in the Merkle tree. This exists because:
+Many CT log implementations have a Maximum Merge Delay (MMD) of minutes to hours, where submitted certificates aren't yet included in the Merkle tree. This exists because:
 
 - Many implementations issue SCTs immediately, then incorporate certificates later via background processes.
 - Some implementations have expensive tree update operations.
 - Consistency requires coordinating distributed components.
 
-CompactLog eliminates MMD by reversing this order - certificates are incorporated **before** SCTs are issued:
+CompactLog achieves an MMD of 0 by reversing this order - certificates are incorporated **before** SCTs are issued:
 
 ```
 Submission 1 ─┐
@@ -44,7 +44,7 @@ Submission 2 ─┼─ Wait up to 500ms ─→ Batch tree update ─→ All SCTs
 Submission 3 ─┘                             └── Certificates already incorporated
 ```
 
-The 500ms delay is submission delay, not MMD. Once SCTs are issued, certificates are already in the tree (MMD = 0).
+The 500ms delay is submission latency, not MMD. Once SCTs are issued, certificates are already in the tree, giving us an MMD of 0.
 
 The batching system:
 
@@ -53,7 +53,7 @@ The batching system:
 - Returns SCTs only after certificates are incorporated in the tree
 - No background processing - certificates are immediately available for proofs
 
-This achieves both efficiency and eliminates MMD because:
+This achieves both efficiency and an MMD of 0 because:
 
 1. STH-boundary versioning makes batch updates efficient
 2. Synchronous processing eliminates the post-SCT "merge" phase entirely
@@ -73,7 +73,7 @@ Submit cert → Issue SCT immediately → [MMD period] → Incorporate in tree
 Submit cert → [Batch delay ≤500ms] → Incorporate in tree → Issue SCT
 ```
 
-Result: Traditional logs have MMD after SCT issuance; CompactLog has zero MMD.
+Result: Traditional logs have MMD measured in minutes/hours; CompactLog has an MMD of 0 seconds.
 
 ### STH-Boundary Versioning
 
