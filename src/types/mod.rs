@@ -89,16 +89,16 @@ pub struct DeduplicatedLogEntry {
     pub entry_type: LogEntryType,
 
     /// SHA-256 hash of the certificate data (pointer to cert store)
-    pub certificate_hash: Vec<u8>,
+    pub certificate_hash: [u8; 32],
 
     /// Optional certificate chain as array of certificate hashes
-    pub chain_hashes: Option<Vec<Vec<u8>>>,
+    pub chain_hashes: Option<Vec<[u8; 32]>>,
 
     /// For pre-certificates: the issuer key hash (32 bytes)
-    pub issuer_key_hash: Option<Vec<u8>>,
+    pub issuer_key_hash: Option<[u8; 32]>,
 
     /// For pre-certificates: hash of the original pre-certificate
-    pub original_precert_hash: Option<Vec<u8>>,
+    pub original_precert_hash: Option<[u8; 32]>,
 
     /// The serialized MerkleTreeLeaf data NOT the hash
     pub leaf_data: Vec<u8>,
@@ -114,7 +114,7 @@ impl DeduplicatedLogEntry {
         // Hash the certificate
         let mut hasher = Sha256::new();
         hasher.update(&entry.certificate);
-        let certificate_hash = hasher.finalize().to_vec();
+        let certificate_hash = hasher.finalize().into();
 
         // Hash the chain certificates if present
         let chain_hashes = entry.chain.as_ref().map(|chain| {
@@ -123,7 +123,7 @@ impl DeduplicatedLogEntry {
                 .map(|cert| {
                     let mut hasher = Sha256::new();
                     hasher.update(cert);
-                    hasher.finalize().to_vec()
+                    hasher.finalize().into()
                 })
                 .collect()
         });
@@ -132,7 +132,14 @@ impl DeduplicatedLogEntry {
         let original_precert_hash = entry.original_precert.as_ref().map(|precert| {
             let mut hasher = Sha256::new();
             hasher.update(precert);
-            hasher.finalize().to_vec()
+            hasher.finalize().into()
+        });
+
+        // Convert issuer_key_hash from Vec<u8> to [u8; 32] if present
+        let issuer_key_hash = entry.issuer_key_hash.as_ref().map(|hash| {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&hash[..32]);
+            arr
         });
 
         Self {
@@ -141,17 +148,17 @@ impl DeduplicatedLogEntry {
             entry_type: entry.entry_type,
             certificate_hash,
             chain_hashes,
-            issuer_key_hash: entry.issuer_key_hash.clone(),
+            issuer_key_hash,
             original_precert_hash,
             leaf_data: entry.leaf_data.clone(),
         }
     }
 
     /// Compute SHA-256 hash of certificate data
-    pub fn hash_certificate(certificate: &[u8]) -> Vec<u8> {
+    pub fn hash_certificate(certificate: &[u8]) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(certificate);
-        hasher.finalize().to_vec()
+        hasher.finalize().into()
     }
 }
 

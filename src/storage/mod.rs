@@ -377,7 +377,7 @@ impl CtStorage {
                 let cert_key = format!(
                     "{}:{}",
                     KeyPrefix::CERT,
-                    hex::encode(&DeduplicatedLogEntry::hash_certificate(
+                    hex::encode(DeduplicatedLogEntry::hash_certificate(
                         &log_entry.certificate
                     ))
                 );
@@ -387,7 +387,7 @@ impl CtStorage {
                 if let Some(chain) = &log_entry.chain {
                     for cert in chain {
                         let cert_hash = DeduplicatedLogEntry::hash_certificate(cert);
-                        let cert_key = format!("{}:{}", KeyPrefix::CERT, hex::encode(&cert_hash));
+                        let cert_key = format!("{}:{}", KeyPrefix::CERT, hex::encode(cert_hash));
                         additional_data.push((cert_key.into_bytes(), cert.clone()));
                     }
                 }
@@ -395,7 +395,7 @@ impl CtStorage {
                 // Store original precert if present
                 if let Some(precert) = &log_entry.original_precert {
                     let precert_hash = DeduplicatedLogEntry::hash_certificate(precert);
-                    let cert_key = format!("{}:{}", KeyPrefix::CERT, hex::encode(&precert_hash));
+                    let cert_key = format!("{}:{}", KeyPrefix::CERT, hex::encode(precert_hash));
                     additional_data.push((cert_key.into_bytes(), precert.clone()));
                 }
             }
@@ -607,7 +607,7 @@ impl CtStorage {
             entry_type: dedup_entry.entry_type,
             certificate,
             chain,
-            issuer_key_hash: dedup_entry.issuer_key_hash.clone(),
+            issuer_key_hash: dedup_entry.issuer_key_hash.map(|h| h.to_vec()),
             original_precert,
             leaf_data: dedup_entry.leaf_data.clone(),
         })
