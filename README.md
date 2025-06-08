@@ -11,6 +11,7 @@ A Certificate Transparency (CT) log implementation. CompactLog implements RFC 69
 ## Overview
 
 This implementation provides a complete Certificate Transparency log that:
+
 - Accepts X.509 certificate chains and pre-certificates
 - Issues Signed Certificate Timestamps (SCTs)
 - Maintains a cryptographically verifiable Merkle tree
@@ -27,51 +28,62 @@ CompactLog makes three fundamental design choices that differentiate it from oth
 2. **STH-boundary versioning** - only persisting tree state at published checkpoints.
 3. **Synchronous tree updates** - eliminating the Maximum Merge Delay (MMD) entirely.
 
-### How MMD is Eliminated
+### How MMD is Eliminated Entirely
 
-Many CT log implementations have a Maximum Merge Delay - a window where submitted certificates aren't yet included in the Merkle tree. This exists because:
+Many CT log implementations have a Maximum Merge Delay, where submitted certificates aren't yet included in the Merkle tree. This exists because:
 
+- Many implementations issue SCTs immediately, then incorporate certificates later via background processes.
 - Some implementations have expensive tree update operations.
-- Background signers batch updates for efficiency.
 - Consistency requires coordinating distributed components.
 
-CompactLog eliminates MMD through immediate consistency with intelligent batching:
+CompactLog eliminates MMD by reversing this order - certificates are incorporated **before** SCTs are issued:
 
 ```
 Submission 1 ─┐
-Submission 2 ─┼─ Wait up to 500ms ─→ Batch update ─→ All SCTs returned
-Submission 3 ─┘                       └── Single atomic tree update
+Submission 2 ─┼─ Wait up to 500ms ─→ Batch tree update ─→ All SCTs returned
+Submission 3 ─┘                             └── Certificates already incorporated
 ```
+
+The 500ms delay is submission delay, not MMD. Once SCTs are issued, certificates are already in the tree (MMD = 0).
 
 The batching system:
 
-- Blocks submitters for up to 500ms (configurable) to collect a batch
-- Updates the tree once for the entire batch (not per certificate)
-- Returns SCTs immediately after the batch commits
-- No background processing - submitters get proof-ready SCTs synchronously
+- Collects submissions for up to 500ms (configurable) to form a batch
+- Updates the Merkle tree once for the entire batch
+- Returns SCTs only after certificates are incorporated in the tree
+- No background processing - certificates are immediately available for proofs
 
-This achieves both efficiency and immediate consistency because:
+This achieves both efficiency and eliminates MMD because:
 
-1. STH-boundary versioning makes batch updates cheap (only final state stored).
-2. Synchronous batching eliminates the separate "merge" phase.
-3. Bounded latency - max 500ms wait, but often less with high traffic.
+1. STH-boundary versioning makes batch updates efficient
+2. Synchronous processing eliminates the post-SCT "merge" phase entirely
+3. Bounded submission latency - max 500ms wait, but often less with high traffic
+
+### Traditional vs CompactLog Timing
+
+**Traditional CT implementations:**
+
+```
+Submit cert → Issue SCT immediately → [MMD period] → Incorporate in tree
+```
+
+**CompactLog:**
+
+```
+Submit cert → [Batch delay ≤500ms] → Incorporate in tree → Issue SCT
+```
+
+Result: Traditional logs have MMD after SCT issuance; CompactLog has zero MMD.
 
 ### STH-Boundary Versioning
 
-Merkle tree nodes are only versioned when publishing an STH, not on every update.
+CompactLog versions nodes only at STH publication boundaries:
 
-Example with 1000 certificates between STHs:
+- Update nodes in-memory during batch operations  
+- Store O(log n) versioned nodes only at STH publication
+- With STHs every k certificates: reduces versioned storage from O(n log n) to O(n log n / k)
 
-```
-Without STH-boundary versioning:
-- Store updated nodes for each certificate addition
-- Storage: O(n log n) for n certificates
-
-With STH-boundary versioning:
-- Update nodes in-place during batch operations
-- Store versioned nodes only at STH publication
-- Storage: O(log n) per STH
-```
+**Example**: Publishing STHs every 1000 certificates reduces versioned storage overhead by 1000x.
 
 ### Storage Schema
 
@@ -91,11 +103,10 @@ hash:{leaf_hash} → tree index
 
 Every operation maintains strict consistency:
 
-- Reads see the latest committed STH state.
-- Writes are serialized through async locking.
-- Proofs only available at STH boundaries (ensuring stable references).
-- No eventual consistency - all operations are immediately visible.
-
+- Reads see the latest committed STH state
+- Writes are serialized through asynchronous locking (synchronous from client perspective)
+- Proofs only available at STH boundaries (ensuring stable references)
+- No eventual consistency - all operations are immediately visible
 
 ## Configuration
 
