@@ -261,9 +261,7 @@ async fn initialize_storage(
     cache_config: &Option<CacheConfig>,
     background_runtime: Handle,
 ) -> Result<(Arc<Db>, Path, Arc<dyn ObjectStore>), Box<dyn std::error::Error>> {
-    let mut cache_options = MokaCacheOptions::default();
-    cache_options.max_capacity = 8192 * 1024 * 1024; // 8 GB
-
+    let cache_options = MokaCacheOptions::default();
     let block_cache = Arc::new(MokaCache::new_with_opts(cache_options));
 
     let garbage_collector_directory_options = GarbageCollectorDirectoryOptions {
