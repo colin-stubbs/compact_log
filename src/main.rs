@@ -1,5 +1,4 @@
 use config::Config;
-use der::oid::db;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::LineEnding;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
