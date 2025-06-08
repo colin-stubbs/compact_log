@@ -255,7 +255,7 @@ async fn initialize_storage(
     cache_config: &Option<CacheConfig>,
 ) -> Result<(Arc<Db>, Path, Arc<dyn ObjectStore>), Box<dyn std::error::Error>> {
     let mut cache_options = MokaCacheOptions::default();
-    cache_options.max_capacity = 1024 * 1024 * 1024; // 1 GB
+    cache_options.max_capacity = 8192 * 1024 * 1024; // 8 GB
 
     let block_cache = Arc::new(MokaCache::new_with_opts(cache_options));
 
