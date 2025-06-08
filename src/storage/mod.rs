@@ -57,7 +57,6 @@ pub struct CertificateSctEntry {
     pub timestamp: u64,
 }
 
-
 /// Statistics for batch processing
 #[derive(Debug, Default)]
 struct BatchStats {
@@ -98,7 +97,7 @@ pub struct CtStorage {
 impl BatchConfig {
     pub fn default() -> Self {
         Self {
-            max_batch_size: 500,
+            max_batch_size: 1_000,
             max_batch_timeout_ms: 500,
         }
     }
@@ -124,7 +123,6 @@ impl CtStorage {
             Self::batch_worker(batch_receiver, config, mutex_clone, tree_clone, stats_clone).await;
         });
 
-
         // Start metrics logging task
         let metrics_sender = batch_sender.clone();
         let metrics_stats = batch_stats.clone();
@@ -132,10 +130,7 @@ impl CtStorage {
             Self::metrics_worker(metrics_sender, metrics_stats).await;
         });
 
-        Ok(Self {
-            db,
-            batch_sender,
-        })
+        Ok(Self { db, batch_sender })
     }
 
     /// Add entry to batch queue and return assigned index
@@ -509,7 +504,6 @@ impl CtStorage {
         }
     }
 
-
     /// Background worker that logs queue metrics periodically
     async fn metrics_worker(
         batch_sender: mpsc::Sender<BatchEntry>,
@@ -582,5 +576,4 @@ impl CtStorage {
             }
         }
     }
-
 }
