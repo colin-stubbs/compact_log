@@ -8,7 +8,7 @@ description = "A compact log server for storing and serving CT logs."
 debug = true
 
 [dependencies]
-slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "98d265b9734f09c56c5ed72911bb0041d3bc600a", features = [
+slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "3635d74448a7d9e83a2b41b76fe2e42915d397e7", features = [
     "zstd",
     "azure",
 ] }
