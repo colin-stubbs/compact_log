@@ -13,6 +13,7 @@ use axum::{
     response::Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use futures;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use x509_cert::der::Decode;
@@ -354,9 +355,12 @@ pub async fn get_sth(
     State(state): State<Arc<ApiState>>,
 ) -> ApiResult<crate::types::tree_head::SthResponse> {
     // Get the committed root (which includes the committed size)
-    let committed_root = state.merkle_tree.committed_root().await
+    let committed_root = state
+        .merkle_tree
+        .committed_root()
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
-    
+
     let tree_size = committed_root.num_leaves();
     let root_hash = committed_root.as_bytes().to_vec();
 
@@ -373,7 +377,8 @@ pub async fn get_sth_consistency(
     State(state): State<Arc<ApiState>>,
     Query(params): Query<GetConsistencyProofRequest>,
 ) -> ApiResult<GetConsistencyProofResponse> {
-    let proof = state.merkle_tree
+    let proof = state
+        .merkle_tree
         .consistency_proof_between_sizes(params.first, params.second)
         .await
         .map_err(|e| match e {
@@ -424,7 +429,8 @@ pub async fn get_proof_by_hash(
         ));
     }
 
-    let proof = state.merkle_tree
+    let proof = state
+        .merkle_tree
         .prove_inclusion_efficient(params.tree_size, leaf_index)
         .await
         .map_err(|e| match e {
@@ -458,20 +464,19 @@ pub async fn get_entries(
     let count = (params.end - params.start + 1).min(MAX_ENTRIES);
     let end = params.start + count - 1;
 
+    // Fetch all entries in parallel
+    let futures: Vec<_> = (params.start..=end)
+        .map(|i| state.storage.get_entry(i))
+        .collect();
+
+    let results = futures::future::join_all(futures).await;
+
     let mut entries = Vec::new();
 
-    for i in params.start..=end {
-        let entry_key = format!("{}:{}", crate::storage::KeyPrefix::ENTRY, i);
-
-        if let Some(entry_data) = state
-            .storage
-            .get(&entry_key)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?
+    for (_idx, result) in results.into_iter().enumerate() {
+        if let Some(log_entry) =
+            result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?
         {
-            let log_entry = crate::types::LogEntry::deserialize(&entry_data)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
-
             let leaf_input = log_entry
                 .serialize()
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
@@ -614,23 +619,19 @@ pub async fn get_entry_and_proof(
         ));
     }
 
-    let entry_key = format!("{}:{}", crate::storage::KeyPrefix::ENTRY, params.leaf_index);
-    let log_entry = if let Some(entry_data) = state
+    let log_entry = state
         .storage
-        .get(&entry_key)
+        .get_entry(params.leaf_index)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?
-    {
-        crate::types::LogEntry::deserialize(&entry_data)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?
-    } else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "Log entry not found".to_string(),
-            }),
-        ));
-    };
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Log entry not found".to_string(),
+                }),
+            )
+        })?;
 
     let chain_data = log_entry
         .chain
@@ -719,7 +720,8 @@ pub async fn get_entry_and_proof(
         }
     }
 
-    let proof = state.merkle_tree
+    let proof = state
+        .merkle_tree
         .prove_inclusion_efficient(tree_size, params.leaf_index)
         .await
         .map_err(|e| match e {

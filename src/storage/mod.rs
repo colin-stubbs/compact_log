@@ -1,5 +1,5 @@
 use crate::merkle_storage::StorageBackedMerkleTree;
-use crate::types::{sct::SignedCertificateTimestamp, LogEntry};
+use crate::types::{sct::SignedCertificateTimestamp, DeduplicatedLogEntry, LogEntry};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use slatedb::Db;
@@ -86,6 +86,9 @@ impl KeyPrefix {
 
     /// Certificate hash to SCT mapping for deduplication
     pub const CERT_SCT: &'static str = "cert_sct:";
+
+    /// Certificate store - maps certificate hash to certificate data
+    pub const CERT: &'static str = "cert:";
 }
 
 /// Storage backend for Certificate Transparency log using SlateDB with batching
@@ -284,13 +287,16 @@ impl CtStorage {
             start_time.elapsed()
         );
         for (i, entry) in entries.iter().enumerate() {
-            match entry.log_entry.serialize_for_storage() {
+            let dedup_entry = DeduplicatedLogEntry::from_log_entry(&entry.log_entry);
+
+            match bincode::serde::encode_to_vec(&dedup_entry, bincode::config::standard()) {
                 Ok(entry_data) => {
                     entry_metadata.push((
                         i,
                         entry_data,
                         entry.cert_hash.clone(),
                         entry.sct.clone(),
+                        entry.log_entry.clone(), // Keep original for certificate storage
                     ));
                     leaf_data_vec.push(entry.log_entry.leaf_data.clone());
                 }
@@ -327,7 +333,7 @@ impl CtStorage {
 
             // Prepare all additional data with correct indices
             let mut additional_data = Vec::new();
-            for (vec_idx, (_orig_idx, entry_data, cert_hash, sct)) in
+            for (vec_idx, (_orig_idx, entry_data, cert_hash, sct, log_entry)) in
                 entry_metadata.iter().enumerate()
             {
                 let index = starting_index + vec_idx as u64;
@@ -362,9 +368,36 @@ impl CtStorage {
                         }
                     };
 
+                // Store deduplicated entry
                 additional_data.push((entry_key.into_bytes(), entry_data.clone()));
                 additional_data.push((hash_key.into_bytes(), index.to_be_bytes().to_vec()));
                 additional_data.push((cert_sct_key.into_bytes(), sct_data));
+
+                // Store the actual certificate data
+                let cert_key = format!(
+                    "{}:{}",
+                    KeyPrefix::CERT,
+                    hex::encode(&DeduplicatedLogEntry::hash_certificate(
+                        &log_entry.certificate
+                    ))
+                );
+                additional_data.push((cert_key.into_bytes(), log_entry.certificate.clone()));
+
+                // Store chain certificates if present
+                if let Some(chain) = &log_entry.chain {
+                    for cert in chain {
+                        let cert_hash = DeduplicatedLogEntry::hash_certificate(cert);
+                        let cert_key = format!("{}:{}", KeyPrefix::CERT, hex::encode(&cert_hash));
+                        additional_data.push((cert_key.into_bytes(), cert.clone()));
+                    }
+                }
+
+                // Store original precert if present
+                if let Some(precert) = &log_entry.original_precert {
+                    let precert_hash = DeduplicatedLogEntry::hash_certificate(precert);
+                    let cert_key = format!("{}:{}", KeyPrefix::CERT, hex::encode(&precert_hash));
+                    additional_data.push((cert_key.into_bytes(), precert.clone()));
+                }
             }
 
             tracing::trace!("Elapsed time before batch push: {:?}", start_time.elapsed());
@@ -372,17 +405,7 @@ impl CtStorage {
                 .batch_push_with_data(leaf_data_vec, additional_data)
                 .await
             {
-                Ok(actual_starting_index) => {
-                    // Sanity check
-                    if actual_starting_index != starting_index {
-                        tracing::error!(
-                            "Index mismatch: expected {}, got {}",
-                            starting_index,
-                            actual_starting_index
-                        );
-                    }
-                    Ok(actual_starting_index)
-                }
+                Ok(actual_starting_index) => Ok(actual_starting_index),
                 Err(e) => Err(StorageError::InvalidFormat(format!(
                     "Merkle tree error: {:?}",
                     e
@@ -500,6 +523,100 @@ impl CtStorage {
                         })?;
                 Ok(Some(entry))
             }
+            None => Ok(None),
+        }
+    }
+
+    /// Get a certificate by its hash
+    pub async fn get_certificate(&self, cert_hash: &[u8]) -> Result<Option<Vec<u8>>> {
+        let key = format!("{}:{}", KeyPrefix::CERT, hex::encode(cert_hash));
+        match self.get(&key).await? {
+            Some(bytes) => Ok(Some(bytes.to_vec())),
+            None => Ok(None),
+        }
+    }
+
+    /// Get a deduplicated log entry by index
+    pub async fn get_deduplicated_entry(&self, index: u64) -> Result<Option<DeduplicatedLogEntry>> {
+        let key = format!("{}:{}", KeyPrefix::ENTRY, index);
+        match self.get(&key).await? {
+            Some(bytes) => {
+                let entry: DeduplicatedLogEntry =
+                    bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+                        .map(|(entry, _)| entry)
+                        .map_err(|e| {
+                            StorageError::InvalidFormat(format!(
+                                "Failed to deserialize deduplicated entry: {}",
+                                e
+                            ))
+                        })?;
+                Ok(Some(entry))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Reconstruct a full LogEntry from a DeduplicatedLogEntry
+    pub async fn reconstruct_log_entry(
+        &self,
+        dedup_entry: &DeduplicatedLogEntry,
+    ) -> Result<LogEntry> {
+        // Retrieve the main certificate
+        let certificate = self
+            .get_certificate(&dedup_entry.certificate_hash)
+            .await?
+            .ok_or_else(|| {
+                StorageError::InvalidFormat(format!(
+                    "Certificate not found: {}",
+                    hex::encode(&dedup_entry.certificate_hash)
+                ))
+            })?;
+
+        // Retrieve chain certificates if present
+        let chain = if let Some(chain_hashes) = &dedup_entry.chain_hashes {
+            let mut chain_certs = Vec::new();
+            for hash in chain_hashes {
+                let cert = self.get_certificate(hash).await?.ok_or_else(|| {
+                    StorageError::InvalidFormat(format!(
+                        "Chain certificate not found: {}",
+                        hex::encode(hash)
+                    ))
+                })?;
+                chain_certs.push(cert);
+            }
+            Some(chain_certs)
+        } else {
+            None
+        };
+
+        // Retrieve original precert if present
+        let original_precert = if let Some(precert_hash) = &dedup_entry.original_precert_hash {
+            Some(self.get_certificate(precert_hash).await?.ok_or_else(|| {
+                StorageError::InvalidFormat(format!(
+                    "Original precert not found: {}",
+                    hex::encode(precert_hash)
+                ))
+            })?)
+        } else {
+            None
+        };
+
+        Ok(LogEntry {
+            index: dedup_entry.index,
+            timestamp: dedup_entry.timestamp,
+            entry_type: dedup_entry.entry_type,
+            certificate,
+            chain,
+            issuer_key_hash: dedup_entry.issuer_key_hash.clone(),
+            original_precert,
+            leaf_data: dedup_entry.leaf_data.clone(),
+        })
+    }
+
+    /// Get a full log entry by index (with reconstruction)
+    pub async fn get_entry(&self, index: u64) -> Result<Option<LogEntry>> {
+        match self.get_deduplicated_entry(index).await? {
+            Some(dedup_entry) => Ok(Some(self.reconstruct_log_entry(&dedup_entry).await?)),
             None => Ok(None),
         }
     }

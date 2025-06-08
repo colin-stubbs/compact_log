@@ -76,9 +76,84 @@ pub struct LogEntry {
     pub leaf_data: Vec<u8>,
 }
 
+/// Deduplicated certificate entry that stores certificate hashes instead of full data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeduplicatedLogEntry {
+    /// The index of this entry in the log
+    pub index: u64,
+
+    /// Timestamp when the certificate was added
+    pub timestamp: DateTime<Utc>,
+
+    /// The entry type (X509 or Precert)
+    pub entry_type: LogEntryType,
+
+    /// SHA-256 hash of the certificate data (pointer to cert store)
+    pub certificate_hash: Vec<u8>,
+
+    /// Optional certificate chain as array of certificate hashes
+    pub chain_hashes: Option<Vec<Vec<u8>>>,
+
+    /// For pre-certificates: the issuer key hash (32 bytes)
+    pub issuer_key_hash: Option<Vec<u8>>,
+
+    /// For pre-certificates: hash of the original pre-certificate
+    pub original_precert_hash: Option<Vec<u8>>,
+
+    /// The serialized MerkleTreeLeaf data NOT the hash
+    pub leaf_data: Vec<u8>,
+}
+
 /// CT Poison Extension OID: 1.3.6.1.4.1.11129.2.4.3
 const POISON_EXTENSION_OID: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.4.3");
+
+impl DeduplicatedLogEntry {
+    /// Create a new deduplicated log entry from a regular log entry
+    pub fn from_log_entry(entry: &LogEntry) -> Self {
+        // Hash the certificate
+        let mut hasher = Sha256::new();
+        hasher.update(&entry.certificate);
+        let certificate_hash = hasher.finalize().to_vec();
+
+        // Hash the chain certificates if present
+        let chain_hashes = entry.chain.as_ref().map(|chain| {
+            chain
+                .iter()
+                .map(|cert| {
+                    let mut hasher = Sha256::new();
+                    hasher.update(cert);
+                    hasher.finalize().to_vec()
+                })
+                .collect()
+        });
+
+        // Hash the original precert if present
+        let original_precert_hash = entry.original_precert.as_ref().map(|precert| {
+            let mut hasher = Sha256::new();
+            hasher.update(precert);
+            hasher.finalize().to_vec()
+        });
+
+        Self {
+            index: entry.index,
+            timestamp: entry.timestamp,
+            entry_type: entry.entry_type,
+            certificate_hash,
+            chain_hashes,
+            issuer_key_hash: entry.issuer_key_hash.clone(),
+            original_precert_hash,
+            leaf_data: entry.leaf_data.clone(),
+        }
+    }
+
+    /// Compute SHA-256 hash of certificate data
+    pub fn hash_certificate(certificate: &[u8]) -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        hasher.update(certificate);
+        hasher.finalize().to_vec()
+    }
+}
 
 impl LogEntry {
     pub fn new_with_timestamp(
@@ -288,22 +363,6 @@ impl LogEntry {
         Ok(data)
     }
 
-    /// Serialize the log entry for internal storage
-    pub fn serialize_for_storage(&self) -> Result<Vec<u8>> {
-        Ok(
-            bincode::serde::encode_to_vec(self, bincode::config::standard())
-                .map_err(|e| CtError::InvalidCertificate(format!("Failed to serialize: {}", e)))?,
-        )
-    }
-
-    /// Deserialize a log entry from storage
-    pub fn deserialize(data: &[u8]) -> Result<Self> {
-        Ok(
-            bincode::serde::decode_from_slice(data, bincode::config::standard())
-                .map_err(|e| CtError::InvalidCertificate(format!("Failed to deserialize: {}", e)))?
-                .0,
-        )
-    }
 }
 
 /// Request to add a certificate to the log
