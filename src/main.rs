@@ -1,11 +1,13 @@
 use config::Config;
+use der::oid::db;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::LineEnding;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use p256::SecretKey;
 use serde::{Deserialize, Serialize};
 use slatedb::config::{
-    CompactorOptions, CompressionCodec, ObjectStoreCacheOptions, SstIteratorOptions,
+    CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    ObjectStoreCacheOptions, SstIteratorOptions,
 };
 use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
 use slatedb::{
@@ -259,8 +261,24 @@ async fn initialize_storage(
 
     let mut db_options = Settings::default();
     db_options.compression_codec = Some(CompressionCodec::Lz4);
+    db_options.garbage_collector_options = Some(GarbageCollectorOptions {
+        wal_options: Some(GarbageCollectorDirectoryOptions {
+            interval: Some(Duration::from_secs(60)),
+            min_age: Duration::from_secs(60),
+        }),
+        manifest_options: Some(GarbageCollectorDirectoryOptions {
+            interval: Some(Duration::from_secs(60)),
+            min_age: Duration::from_secs(60),
+        }),
+        compacted_options: Some(GarbageCollectorDirectoryOptions {
+            interval: Some(Duration::from_secs(60)),
+            min_age: Duration::from_secs(60),
+        }),
+        ..default::Default::default()
+    });
 
     let compactor_options: CompactorOptions = CompactorOptions {
+        max_sst_size: 64 * 1024 * 1024, // 64 MB
         poll_interval: Duration::from_millis(100),
         max_concurrent_compactions: 16,
         sst_iterator_options: SstIteratorOptions {
