@@ -262,7 +262,6 @@ async fn initialize_storage(
     db_options.block_size = 64 * 1024; // 64 KB
 
     let compactor_options: CompactorOptions = CompactorOptions {
-        max_sst_size: 64 * 1024 * 1024, // 64 MB
         poll_interval: Duration::from_millis(100),
         max_concurrent_compactions: 16,
         sst_iterator_options: SstIteratorOptions {
