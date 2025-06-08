@@ -97,7 +97,26 @@ nver:{node} → latest version of node
 meta → current tree size
 committed_size → last STH boundary
 hash:{leaf_hash} → tree index
+cert_sct:{cert_hash} → SCT data
+
+# Certificate storage (deduplication)
+cert:{cert_hash} → certificate binary data
+entry:{index} → deduplicated log entry
 ```
+
+### Certificate Chain Deduplication
+
+CompactLog stores certificate chains using content-addressable storage:
+
+1. **Entry structure**: Each log entry stores SHA-256 hashes of certificates rather than the certificates themselves
+2. **Certificate store**: Certificates are stored separately under `cert:{hash}` keys
+3. **Deduplication**: Multiple entries referencing the same certificate (e.g., intermediate CA certs) share the same stored copy
+4. **Reconstruction**: The API reconstructs full certificate chains by resolving hash references during retrieval
+
+The `DeduplicatedLogEntry` structure contains:
+- Certificate hash (32 bytes)
+- Chain certificate hashes (array of 32-byte hashes)
+- Original metadata (timestamp, index, entry type)
 
 ### Consistency Model
 
