@@ -6,7 +6,7 @@
 
 # CompactLog
 
-A Certificate Transparency (CT) log implementation. CompactLog implements RFC 6962 Certificate Transparency APIs on top of SlateDB to explore how LSM-tree storage can address traditional CT log scalability challenges.
+A Certificate Transparency (CT) log implementation. CompactLog implements the RFC 6962 Certificate Transparency API on top of SlateDB to explore how LSM-tree storage can address traditional CT log scalability challenges.
 
 ## Overview
 
@@ -28,15 +28,15 @@ CompactLog makes three fundamental design choices that differentiate it from oth
 2. **STH-boundary versioning** - only persisting tree state at published checkpoints.
 3. **Synchronous tree updates** - achieving a Maximum Merge Delay (MMD) of 0 seconds.
 
-### How MMD is Set to Zero
+### How MD is Eliminated Entirely
 
-Many CT log implementations have a Maximum Merge Delay (MMD) of minutes to hours, where submitted certificates aren't yet included in the Merkle tree. This exists because:
+Many CT log implementations have a Merge Delay (MMD) of minutes to hours, where submitted certificates aren't yet included in the Merkle tree. This exists because:
 
 - Many implementations issue SCTs immediately, then incorporate certificates later via background processes.
 - Some implementations have expensive tree update operations.
 - Consistency requires coordinating distributed components.
 
-CompactLog achieves an MMD of 0 by reversing this order - certificates are incorporated **before** SCTs are issued:
+CompactLog eliminates a MD by reversing this order - certificates are incorporated **before** SCTs are issued:
 
 ```
 Submission 1 ─┐
@@ -44,7 +44,7 @@ Submission 2 ─┼─ Wait up to 500ms ─→ Batch tree update ─→ All SCTs
 Submission 3 ─┘                             └── Certificates already incorporated
 ```
 
-The 500ms delay is submission latency, not MMD. Once SCTs are issued, certificates are already in the tree, giving us an MMD of 0.
+The 500ms delay is submission latency, not a merge delay. Once SCTs are issued, certificates are already in the tree.
 
 The batching system:
 
@@ -52,12 +52,6 @@ The batching system:
 - Updates the Merkle tree once for the entire batch
 - Returns SCTs only after certificates are incorporated in the tree
 - No background processing - certificates are immediately available for proofs
-
-This achieves both efficiency and an MMD of 0 because:
-
-1. STH-boundary versioning makes batch updates efficient
-2. Synchronous processing eliminates the post-SCT "merge" phase entirely
-3. Bounded submission latency - max 500ms wait, but often less with high traffic
 
 ### Traditional vs CompactLog Timing
 
