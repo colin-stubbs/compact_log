@@ -95,9 +95,9 @@ impl From<crate::types::CtError> for ErrorResponse {
 }
 
 impl From<crate::storage::StorageError> for ErrorResponse {
-    fn from(_err: crate::storage::StorageError) -> Self {
+    fn from(err: crate::storage::StorageError) -> Self {
         Self {
-            error: "Storage error".to_string(),
+            error: format!("Storage error: {}", err),
         }
     }
 }
