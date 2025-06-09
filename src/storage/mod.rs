@@ -1,7 +1,7 @@
 use crate::merkle_storage::StorageBackedMerkleTree;
 use crate::types::{sct::SignedCertificateTimestamp, DeduplicatedLogEntry, LogEntry};
 use bytes::Bytes;
-use futures::future::{join_all, OptionFuture};
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use slatedb::Db;
 use std::sync::Arc;
@@ -656,37 +656,70 @@ impl CtStorage {
         &self,
         dedup_entry: &DeduplicatedLogEntry,
     ) -> Result<LogEntry> {
-        let main_cert_fut = self.get_certificate(&dedup_entry.certificate_hash);
+        let storage_clone = self.clone();
+        let cert_hash = dedup_entry.certificate_hash.clone();
+        let main_cert_handle =
+            tokio::spawn(async move { storage_clone.get_certificate(&cert_hash).await });
 
-        let chain_futs = dedup_entry.chain_hashes.as_ref().map(|hashes| {
+        let chain_handles = dedup_entry.chain_hashes.as_ref().map(|hashes| {
             hashes
                 .iter()
-                .map(|hash| self.get_certificate(hash))
+                .map(|hash| {
+                    let storage_clone = self.clone();
+                    let hash_clone = hash.clone();
+                    tokio::spawn(async move { storage_clone.get_certificate(&hash_clone).await })
+                })
                 .collect::<Vec<_>>()
         });
 
-        let precert_fut = OptionFuture::from(
-            dedup_entry
-                .original_precert_hash
-                .as_ref()
-                .map(|hash| self.get_certificate(hash)),
-        );
+        let precert_handle = dedup_entry.original_precert_hash.as_ref().map(|hash| {
+            let storage_clone = self.clone();
+            let hash_clone = hash.clone();
+            tokio::spawn(async move { storage_clone.get_certificate(&hash_clone).await })
+        });
 
         let (main_cert_result, chain_results, precert_result) = tokio::join!(
-            main_cert_fut,
             async {
-                match chain_futs {
-                    Some(futs) => Some(join_all(futs).await),
-                    None => None,
+                main_cert_handle
+                    .await
+                    .map_err(|e| StorageError::InvalidFormat(format!("Task join error: {}", e)))
+            },
+            async {
+                match chain_handles {
+                    Some(handles) => {
+                        let results = join_all(handles).await;
+                        let mut processed_results = Vec::new();
+                        for result in results {
+                            match result {
+                                Ok(r) => processed_results.push(r),
+                                Err(e) => {
+                                    return Err(StorageError::InvalidFormat(format!(
+                                        "Task join error: {}",
+                                        e
+                                    )))
+                                }
+                            }
+                        }
+                        Ok(Some(processed_results))
+                    }
+                    None => Ok(None),
                 }
             },
-            precert_fut
+            async {
+                match precert_handle {
+                    Some(handle) => handle
+                        .await
+                        .map_err(|e| StorageError::InvalidFormat(format!("Task join error: {}", e)))
+                        .map(Some),
+                    None => Ok(None),
+                }
+            }
         );
 
-        let certificate = main_cert_result?
+        let certificate = main_cert_result??
             .ok_or_else(|| StorageError::InvalidFormat("Certificate not found".to_string()))?;
 
-        let chain = match chain_results {
+        let chain = match chain_results? {
             Some(results) => {
                 let mut chain_certs = Vec::new();
                 for (_i, result) in results.into_iter().enumerate() {
@@ -700,7 +733,7 @@ impl CtStorage {
             None => None,
         };
 
-        let original_precert = match precert_result {
+        let original_precert = match precert_result? {
             Some(result) => Some(result?.ok_or_else(|| {
                 StorageError::InvalidFormat("Original precert not found".to_string())
             })?),
