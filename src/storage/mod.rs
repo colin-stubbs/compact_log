@@ -66,6 +66,11 @@ struct BatchStats {
     total_flush_time_ms: u64,
     min_batch_size: usize,
     max_batch_size: usize,
+    // Certificate deduplication stats
+    total_certs_checked: u64,
+    total_certs_deduplicated: u64,
+    total_bytes_saved: u64,
+    total_dedup_check_time_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -282,6 +287,12 @@ impl CtStorage {
         let mut leaf_data_vec = Vec::new();
         let mut entry_metadata = Vec::new();
         let mut failed_entries = Vec::new();
+        
+        // Deduplication tracking variables
+        let mut cert_hashes_to_check = std::collections::HashSet::new();
+        let mut dedup_savings = 0usize;
+        let mut bytes_saved = 0u64;
+        let mut dedup_check_time_ms = 0u64;
 
         tracing::trace!(
             "Elapsed time before processing entries: {:?}",
@@ -332,9 +343,86 @@ impl CtStorage {
                     }
                 };
 
+            // Collect all unique certificate hashes to check
+            cert_hashes_to_check.clear();
+            let mut cert_data_map = std::collections::HashMap::new();
+            
+            for (_orig_idx, _entry_data, _cert_hash, _sct, log_entry) in entry_metadata.iter() {
+                // Main certificate
+                let cert_hash = DeduplicatedLogEntry::hash_certificate(&log_entry.certificate);
+                if cert_hashes_to_check.insert(cert_hash) {
+                    cert_data_map.insert(cert_hash, log_entry.certificate.clone());
+                }
+
+                // Chain certificates
+                if let Some(chain) = &log_entry.chain {
+                    for cert in chain {
+                        let cert_hash = DeduplicatedLogEntry::hash_certificate(cert);
+                        if cert_hashes_to_check.insert(cert_hash) {
+                            cert_data_map.insert(cert_hash, cert.clone());
+                        }
+                    }
+                }
+
+                // Original precert
+                if let Some(precert) = &log_entry.original_precert {
+                    let precert_hash = DeduplicatedLogEntry::hash_certificate(precert);
+                    if cert_hashes_to_check.insert(precert_hash) {
+                        cert_data_map.insert(precert_hash, precert.clone());
+                    }
+                }
+            }
+
+            // Check which certificates already exist
+            let keys_to_check: Vec<Vec<u8>> = cert_hashes_to_check
+                .iter()
+                .map(|hash| {
+                    let mut key = Vec::with_capacity(KeyPrefix::CERT.len() + 32);
+                    key.extend_from_slice(KeyPrefix::CERT);
+                    key.extend_from_slice(hash);
+                    key
+                })
+                .collect();
+
+            let dedup_check_start = Instant::now();
+            let existence_results = match merkle_tree.check_keys_exist(&keys_to_check).await {
+                Ok(results) => results,
+                Err(e) => {
+                    tracing::warn!("Failed to check certificate existence: {:?}, will write all certificates", e);
+                    vec![false; keys_to_check.len()]
+                }
+            };
+            dedup_check_time_ms = dedup_check_start.elapsed().as_millis() as u64;
+
+            let existing_certs: std::collections::HashSet<[u8; 32]> = cert_hashes_to_check
+                .iter()
+                .zip(existence_results.iter())
+                .filter_map(|(hash, exists)| if *exists { Some(*hash) } else { None })
+                .collect();
+
+            dedup_savings = existing_certs.len();
+            bytes_saved = 0;
+            
+            if dedup_savings > 0 {
+                // Calculate bytes saved by not writing duplicate certificates
+                for (hash, cert_data) in cert_data_map.iter() {
+                    if existing_certs.contains(hash) {
+                        bytes_saved += cert_data.len() as u64;
+                    }
+                }
+                
+                tracing::info!(
+                    "Certificate deduplication: {} unique certs, {} already exist, saving {} writes ({} bytes)",
+                    cert_hashes_to_check.len(),
+                    dedup_savings,
+                    dedup_savings,
+                    bytes_saved
+                );
+            }
+
             // Prepare all additional data with correct indices
             let mut additional_data = Vec::new();
-            for (vec_idx, (_orig_idx, entry_data, cert_hash, sct, log_entry)) in
+            for (vec_idx, (_orig_idx, entry_data, cert_hash, sct, _log_entry)) in
                 entry_metadata.iter().enumerate()
             {
                 let index = starting_index + vec_idx as u64;
@@ -375,32 +463,15 @@ impl CtStorage {
                 additional_data.push((entry_key, entry_data.clone()));
                 additional_data.push((hash_key, index.to_be_bytes().to_vec()));
                 additional_data.push((cert_sct_key, sct_data));
+            }
 
-                // Store the actual certificate data
-                let cert_hash = DeduplicatedLogEntry::hash_certificate(&log_entry.certificate);
-                let mut cert_key = Vec::with_capacity(KeyPrefix::CERT.len() + 32);
-                cert_key.extend_from_slice(KeyPrefix::CERT);
-                cert_key.extend_from_slice(&cert_hash);
-                additional_data.push((cert_key, log_entry.certificate.clone()));
-
-                // Store chain certificates if present
-                if let Some(chain) = &log_entry.chain {
-                    for cert in chain {
-                        let cert_hash = DeduplicatedLogEntry::hash_certificate(cert);
-                        let mut cert_key = Vec::with_capacity(KeyPrefix::CERT.len() + 32);
-                        cert_key.extend_from_slice(KeyPrefix::CERT);
-                        cert_key.extend_from_slice(&cert_hash);
-                        additional_data.push((cert_key, cert.clone()));
-                    }
-                }
-
-                // Store original precert if present
-                if let Some(precert) = &log_entry.original_precert {
-                    let precert_hash = DeduplicatedLogEntry::hash_certificate(precert);
+            // Add only new certificates to additional_data
+            for (hash, cert_data) in cert_data_map.iter() {
+                if !existing_certs.contains(hash) {
                     let mut cert_key = Vec::with_capacity(KeyPrefix::CERT.len() + 32);
                     cert_key.extend_from_slice(KeyPrefix::CERT);
-                    cert_key.extend_from_slice(&precert_hash);
-                    additional_data.push((cert_key, precert.clone()));
+                    cert_key.extend_from_slice(hash);
+                    additional_data.push((cert_key, cert_data.clone()));
                 }
             }
 
@@ -478,6 +549,14 @@ impl CtStorage {
         }
         if batch_size > stats.max_batch_size {
             stats.max_batch_size = batch_size;
+        }
+
+        // Update deduplication stats if we had any certificates
+        if !cert_hashes_to_check.is_empty() {
+            stats.total_certs_checked += cert_hashes_to_check.len() as u64;
+            stats.total_certs_deduplicated += dedup_savings as u64;
+            stats.total_bytes_saved += bytes_saved;
+            stats.total_dedup_check_time_ms += dedup_check_time_ms;
         }
 
         tracing::trace!(
@@ -679,14 +758,31 @@ impl CtStorage {
                 let avg_flush_time = interval_time_ms / interval_batches;
                 let throughput = (interval_entries as f64 / 5.0) as u64; // entries per second
 
+                // Calculate deduplication stats for this interval
+                let interval_certs_checked = stats.total_certs_checked.saturating_sub(last_stats.total_certs_checked);
+                let interval_certs_deduped = stats.total_certs_deduplicated.saturating_sub(last_stats.total_certs_deduplicated);
+                let interval_bytes_saved = stats.total_bytes_saved.saturating_sub(last_stats.total_bytes_saved);
+                let interval_dedup_time = stats.total_dedup_check_time_ms.saturating_sub(last_stats.total_dedup_check_time_ms);
+
+                let dedup_rate = if interval_certs_checked > 0 {
+                    (interval_certs_deduped as f64 / interval_certs_checked as f64) * 100.0
+                } else {
+                    0.0
+                };
+
                 tracing::info!(
-                    "Batch stats: {} batches flushed (avg size: {}, avg time: {}ms), throughput: {} entries/sec, queue: {}/{}",
+                    "Batch stats: {} batches flushed (avg size: {}, avg time: {}ms), throughput: {} entries/sec, queue: {}/{}, dedup: {:.1}% ({}/{} certs, {} KB saved, {}ms)",
                     interval_batches,
                     avg_batch_size,
                     avg_flush_time,
                     throughput,
                     current_depth,
-                    max_capacity
+                    max_capacity,
+                    dedup_rate,
+                    interval_certs_deduped,
+                    interval_certs_checked,
+                    interval_bytes_saved / 1024,
+                    interval_dedup_time
                 );
             } else {
                 tracing::info!(
@@ -703,6 +799,10 @@ impl CtStorage {
                 total_flush_time_ms: stats.total_flush_time_ms,
                 min_batch_size: stats.min_batch_size,
                 max_batch_size: stats.max_batch_size,
+                total_certs_checked: stats.total_certs_checked,
+                total_certs_deduplicated: stats.total_certs_deduplicated,
+                total_bytes_saved: stats.total_bytes_saved,
+                total_dedup_check_time_ms: stats.total_dedup_check_time_ms,
             };
             drop(stats);
 

@@ -201,6 +201,19 @@ impl StorageBackedMerkleTree {
 
         Ok(proof)
     }
+
+    /// Check if multiple keys exist in the underlying database
+    pub async fn check_keys_exist(&self, keys: &[Vec<u8>]) -> Result<Vec<bool>> {
+        self.tree
+            .check_keys_exist(keys)
+            .await
+            .map_err(|e| {
+                CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
+                    "Failed to check keys: {:?}",
+                    e
+                )))
+            })
+    }
 }
 
 pub mod serialization {

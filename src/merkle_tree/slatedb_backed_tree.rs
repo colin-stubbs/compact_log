@@ -82,6 +82,22 @@ where
     H: Digest,
     T: HashableLeaf + serde::Serialize + serde::de::DeserializeOwned,
 {
+    /// Check if multiple keys exist in the database
+    pub async fn check_keys_exist(&self, keys: &[Vec<u8>]) -> Result<Vec<bool>, SlateDbTreeError> {
+        let futures: Vec<_> = keys
+            .iter()
+            .map(|key| async move {
+                match self.db.get(key).await {
+                    Ok(Some(_)) => Ok(true),
+                    Ok(None) => Ok(false),
+                    Err(e) => Err(SlateDbTreeError::DbError(e)),
+                }
+            })
+            .collect();
+        
+        futures::future::try_join_all(futures).await
+    }
+
     pub async fn new(db: Arc<Db>) -> Result<Self, SlateDbTreeError> {
         let cache = Cache::builder()
             .max_capacity(5_000_000)
