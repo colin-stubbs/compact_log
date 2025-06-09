@@ -89,8 +89,8 @@ const DEFAULT_MEMORY_BLOCK_CACHE_CAPACITY_MB: u64 = 64; // 64 MB default
 
 #[derive(Debug, Deserialize, Serialize)]
 struct CacheConfig {
-    root_folder: String,
-    max_cache_size_gb: u64,
+    root_folder: Option<String>,
+    max_cache_size_gb: Option<u64>,
     #[serde(default = "default_memory_block_cache_capacity_mb")]
     memory_block_cache_capacity_mb: u64,
 }
@@ -269,13 +269,14 @@ async fn initialize_storage(
     cache_config: &Option<CacheConfig>,
     background_runtime: Handle,
 ) -> Result<(Arc<Db>, Path, Arc<dyn ObjectStore>), Box<dyn std::error::Error>> {
-    let mut cache_options = MokaCacheOptions::default();
-    cache_options.max_capacity = cache_config
+    // Memory block cache can be configured independently of local file cache
+    let memory_block_cache_mb = cache_config
         .as_ref()
         .map(|c| c.memory_block_cache_capacity_mb)
-        .unwrap_or(DEFAULT_MEMORY_BLOCK_CACHE_CAPACITY_MB)
-        * 1024
-        * 1024; // Convert MB to bytes
+        .unwrap_or(DEFAULT_MEMORY_BLOCK_CACHE_CAPACITY_MB);
+
+    let mut cache_options = MokaCacheOptions::default();
+    cache_options.max_capacity = memory_block_cache_mb * 1024 * 1024; // Convert MB to bytes
 
     let block_cache = Arc::new(MokaCache::new_with_opts(cache_options));
 
@@ -310,11 +311,21 @@ async fn initialize_storage(
     db_options.compactor_options = Some(compactor_options);
 
     db_options.object_store_cache_options = match cache_config {
-        Some(cache) => ObjectStoreCacheOptions {
-            root_folder: Some(PathBuf::from(&cache.root_folder)),
-            max_cache_size_bytes: Some((cache.max_cache_size_gb * 1024 * 1024 * 1024) as usize),
-            ..default::Default::default()
-        },
+        Some(cache) => {
+            // Only set object store cache if root_folder is provided
+            match (&cache.root_folder, &cache.max_cache_size_gb) {
+                (Some(root_folder), Some(max_size_gb)) => ObjectStoreCacheOptions {
+                    root_folder: Some(PathBuf::from(root_folder)),
+                    max_cache_size_bytes: Some((max_size_gb * 1024 * 1024 * 1024) as usize),
+                    ..default::Default::default()
+                },
+                (Some(root_folder), None) => ObjectStoreCacheOptions {
+                    root_folder: Some(PathBuf::from(root_folder)),
+                    ..default::Default::default()
+                },
+                _ => ObjectStoreCacheOptions::default(),
+            }
+        }
         None => ObjectStoreCacheOptions::default(),
     };
 
