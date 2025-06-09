@@ -9,7 +9,7 @@ use digest::Digest;
 use moka::future::Cache;
 use slatedb::{Db, WriteBatch};
 use std::{fmt, sync::Arc};
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
 #[derive(Debug)]
 pub enum SlateDbTreeError {
@@ -68,7 +68,7 @@ where
     // Key: (node index, version), Value: node hash
     node_cache: Option<Cache<(u64, u64), Vec<u8>>>,
     // Write lock to ensure write operations are serialized
-    write_lock: Arc<RwLock<()>>,
+    write_lock: Arc<Mutex<()>>,
 }
 
 const LEAF_PREFIX: &[u8] = b"leaf:";
@@ -93,7 +93,7 @@ where
             _phantom_h: core::marker::PhantomData,
             _phantom_t: core::marker::PhantomData,
             node_cache: Some(cache),
-            write_lock: Arc::new(RwLock::new(())),
+            write_lock: Arc::new(Mutex::new(())),
         };
 
         let existing_leaves = tree.get_num_leaves().await?;
@@ -181,7 +181,7 @@ where
         additional_data: Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<u64, SlateDbTreeError> {
         // Acquire write lock to ensure serialization of write operations
-        let _write_guard = self.write_lock.write().await;
+        let _write_guard = self.write_lock.lock().await;
 
         let starting_index = self.len().await?;
 
