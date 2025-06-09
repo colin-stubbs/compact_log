@@ -296,7 +296,6 @@ async fn initialize_storage(
 
     let compactor_options: CompactorOptions = CompactorOptions {
         max_sst_size: 64 * 1024 * 1024, // 64 MB
-
         poll_interval: Duration::from_millis(100),
         max_concurrent_compactions: 16,
         sst_iterator_options: SstIteratorOptions {
@@ -373,6 +372,7 @@ async fn initialize_storage(
     let db = Db::builder(path.clone(), blob_store.clone())
         .with_settings(db_options)
         .with_block_cache(block_cache)
+        .with_sst_block_size(65_536)
         .with_compaction_runtime(background_runtime.clone())
         .with_gc_runtime(background_runtime.clone())
         .build()
