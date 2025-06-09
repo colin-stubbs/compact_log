@@ -85,10 +85,18 @@ struct KeysConfig {
     public_key_path: String,
 }
 
+const DEFAULT_MEMORY_BLOCK_CACHE_CAPACITY_MB: u64 = 64; // 64 MB default
+
 #[derive(Debug, Deserialize, Serialize)]
 struct CacheConfig {
     root_folder: String,
     max_cache_size_gb: u64,
+    #[serde(default = "default_memory_block_cache_capacity_mb")]
+    memory_block_cache_capacity_mb: u64,
+}
+
+fn default_memory_block_cache_capacity_mb() -> u64 {
+    DEFAULT_MEMORY_BLOCK_CACHE_CAPACITY_MB
 }
 
 use mimalloc::MiMalloc;
@@ -261,7 +269,14 @@ async fn initialize_storage(
     cache_config: &Option<CacheConfig>,
     background_runtime: Handle,
 ) -> Result<(Arc<Db>, Path, Arc<dyn ObjectStore>), Box<dyn std::error::Error>> {
-    let cache_options = MokaCacheOptions::default();
+    let mut cache_options = MokaCacheOptions::default();
+    cache_options.max_capacity = cache_config
+        .as_ref()
+        .map(|c| c.memory_block_cache_capacity_mb)
+        .unwrap_or(DEFAULT_MEMORY_BLOCK_CACHE_CAPACITY_MB)
+        * 1024
+        * 1024; // Convert MB to bytes
+
     let block_cache = Arc::new(MokaCache::new_with_opts(cache_options));
 
     let garbage_collector_directory_options = GarbageCollectorDirectoryOptions {
