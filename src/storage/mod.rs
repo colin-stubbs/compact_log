@@ -287,7 +287,7 @@ impl CtStorage {
         let mut leaf_data_vec = Vec::new();
         let mut entry_metadata = Vec::new();
         let mut failed_entries = Vec::new();
-        
+
         // Deduplication tracking variables
         let mut cert_hashes_to_check = std::collections::HashSet::new();
         let mut dedup_savings = 0usize;
@@ -346,7 +346,7 @@ impl CtStorage {
             // Collect all unique certificate hashes to check
             cert_hashes_to_check.clear();
             let mut cert_data_map = std::collections::HashMap::new();
-            
+
             for (_orig_idx, _entry_data, _cert_hash, _sct, log_entry) in entry_metadata.iter() {
                 // Main certificate
                 let cert_hash = DeduplicatedLogEntry::hash_certificate(&log_entry.certificate);
@@ -388,7 +388,10 @@ impl CtStorage {
             let existence_results = match merkle_tree.check_keys_exist(&keys_to_check).await {
                 Ok(results) => results,
                 Err(e) => {
-                    tracing::warn!("Failed to check certificate existence: {:?}, will write all certificates", e);
+                    tracing::warn!(
+                        "Failed to check certificate existence: {:?}, will write all certificates",
+                        e
+                    );
                     vec![false; keys_to_check.len()]
                 }
             };
@@ -402,7 +405,7 @@ impl CtStorage {
 
             dedup_savings = existing_certs.len();
             bytes_saved = 0;
-            
+
             if dedup_savings > 0 {
                 // Calculate bytes saved by not writing duplicate certificates
                 for (hash, cert_data) in cert_data_map.iter() {
@@ -410,8 +413,8 @@ impl CtStorage {
                         bytes_saved += cert_data.len() as u64;
                     }
                 }
-                
-                tracing::info!(
+
+                tracing::debug!(
                     "Certificate deduplication: {} unique certs, {} already exist, saving {} writes ({} bytes)",
                     cert_hashes_to_check.len(),
                     dedup_savings,
@@ -679,13 +682,12 @@ impl CtStorage {
             precert_fut
         );
 
-        let certificate = main_cert_result?.ok_or_else(|| {
-            StorageError::InvalidFormat("Certificate not found".to_string())
-        })?;
+        let certificate = main_cert_result?
+            .ok_or_else(|| StorageError::InvalidFormat("Certificate not found".to_string()))?;
 
         let chain = match chain_results {
             Some(results) => {
-             let mut chain_certs = Vec::new();
+                let mut chain_certs = Vec::new();
                 for (_i, result) in results.into_iter().enumerate() {
                     let cert = result?.ok_or_else(|| {
                         StorageError::InvalidFormat("Chain certificate not found".to_string())
@@ -759,10 +761,18 @@ impl CtStorage {
                 let throughput = (interval_entries as f64 / 5.0) as u64; // entries per second
 
                 // Calculate deduplication stats for this interval
-                let interval_certs_checked = stats.total_certs_checked.saturating_sub(last_stats.total_certs_checked);
-                let interval_certs_deduped = stats.total_certs_deduplicated.saturating_sub(last_stats.total_certs_deduplicated);
-                let interval_bytes_saved = stats.total_bytes_saved.saturating_sub(last_stats.total_bytes_saved);
-                let interval_dedup_time = stats.total_dedup_check_time_ms.saturating_sub(last_stats.total_dedup_check_time_ms);
+                let interval_certs_checked = stats
+                    .total_certs_checked
+                    .saturating_sub(last_stats.total_certs_checked);
+                let interval_certs_deduped = stats
+                    .total_certs_deduplicated
+                    .saturating_sub(last_stats.total_certs_deduplicated);
+                let interval_bytes_saved = stats
+                    .total_bytes_saved
+                    .saturating_sub(last_stats.total_bytes_saved);
+                let interval_dedup_time = stats
+                    .total_dedup_check_time_ms
+                    .saturating_sub(last_stats.total_dedup_check_time_ms);
 
                 let dedup_rate = if interval_certs_checked > 0 {
                     (interval_certs_deduped as f64 / interval_certs_checked as f64) * 100.0
