@@ -459,7 +459,7 @@ pub async fn get_entries(
         ));
     }
 
-    const MAX_ENTRIES: u64 = 128;
+    const MAX_ENTRIES: u64 = 64;
 
     let count = (params.end - params.start + 1).min(MAX_ENTRIES);
     let end = params.start + count - 1;
