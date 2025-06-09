@@ -585,7 +585,7 @@ where
 
     pub async fn push(&self, new_val: T) -> Result<(), SlateDbTreeError> {
         // Acquire write lock to ensure serialization of write operations
-        let _write_guard = self.write_lock.write().await;
+        let _write_guard = self.write_lock.lock().await;
 
         let num_leaves = self.len().await?;
 
