@@ -80,16 +80,16 @@ pub struct KeyPrefix;
 
 impl KeyPrefix {
     /// Log entries
-    pub const ENTRY: &'static str = "entry:";
+    pub const ENTRY: &'static [u8] = b"entry:";
 
     /// Hash to index mapping for efficient proof-by-hash lookups
-    pub const HASH_INDEX: &'static str = "hash:";
+    pub const HASH_INDEX: &'static [u8] = b"hash:";
 
     /// Certificate hash to SCT mapping for deduplication
-    pub const CERT_SCT: &'static str = "cert_sct:";
+    pub const CERT_SCT: &'static [u8] = b"cert_sct:";
 
     /// Certificate store - maps certificate hash to certificate data
-    pub const CERT: &'static str = "cert:";
+    pub const CERT: &'static [u8] = b"cert:";
 }
 
 /// Storage backend for Certificate Transparency log using SlateDB with batching
@@ -339,7 +339,9 @@ impl CtStorage {
             {
                 let index = starting_index + vec_idx as u64;
 
-                let entry_key = format!("{}:{}", KeyPrefix::ENTRY, index);
+                let mut entry_key = Vec::with_capacity(KeyPrefix::ENTRY.len() + 8);
+                entry_key.extend_from_slice(KeyPrefix::ENTRY);
+                entry_key.extend_from_slice(&index.to_be_bytes());
 
                 // For get-proof-by-hash API, we need to store hash->index mapping
                 use sha2::{Digest, Sha256};
@@ -348,13 +350,13 @@ impl CtStorage {
                 hasher.update(&leaf_data_vec[vec_idx]);
                 let computed_leaf_hash: [u8; 32] = hasher.finalize().into();
 
-                let hash_key = format!(
-                    "{}:{}",
-                    KeyPrefix::HASH_INDEX,
-                    hex::encode(&computed_leaf_hash)
-                );
+                let mut hash_key = Vec::with_capacity(KeyPrefix::HASH_INDEX.len() + 32);
+                hash_key.extend_from_slice(KeyPrefix::HASH_INDEX);
+                hash_key.extend_from_slice(&computed_leaf_hash);
 
-                let cert_sct_key = format!("{}:{}", KeyPrefix::CERT_SCT, hex::encode(cert_hash));
+                let mut cert_sct_key = Vec::with_capacity(KeyPrefix::CERT_SCT.len() + 32);
+                cert_sct_key.extend_from_slice(KeyPrefix::CERT_SCT);
+                cert_sct_key.extend_from_slice(cert_hash);
                 let sct_entry = CertificateSctEntry {
                     index,
                     sct: sct.clone(),
@@ -370,34 +372,35 @@ impl CtStorage {
                     };
 
                 // Store deduplicated entry
-                additional_data.push((entry_key.into_bytes(), entry_data.clone()));
-                additional_data.push((hash_key.into_bytes(), index.to_be_bytes().to_vec()));
-                additional_data.push((cert_sct_key.into_bytes(), sct_data));
+                additional_data.push((entry_key, entry_data.clone()));
+                additional_data.push((hash_key, index.to_be_bytes().to_vec()));
+                additional_data.push((cert_sct_key, sct_data));
 
                 // Store the actual certificate data
-                let cert_key = format!(
-                    "{}:{}",
-                    KeyPrefix::CERT,
-                    hex::encode(DeduplicatedLogEntry::hash_certificate(
-                        &log_entry.certificate
-                    ))
-                );
-                additional_data.push((cert_key.into_bytes(), log_entry.certificate.clone()));
+                let cert_hash = DeduplicatedLogEntry::hash_certificate(&log_entry.certificate);
+                let mut cert_key = Vec::with_capacity(KeyPrefix::CERT.len() + 32);
+                cert_key.extend_from_slice(KeyPrefix::CERT);
+                cert_key.extend_from_slice(&cert_hash);
+                additional_data.push((cert_key, log_entry.certificate.clone()));
 
                 // Store chain certificates if present
                 if let Some(chain) = &log_entry.chain {
                     for cert in chain {
                         let cert_hash = DeduplicatedLogEntry::hash_certificate(cert);
-                        let cert_key = format!("{}:{}", KeyPrefix::CERT, hex::encode(cert_hash));
-                        additional_data.push((cert_key.into_bytes(), cert.clone()));
+                        let mut cert_key = Vec::with_capacity(KeyPrefix::CERT.len() + 32);
+                        cert_key.extend_from_slice(KeyPrefix::CERT);
+                        cert_key.extend_from_slice(&cert_hash);
+                        additional_data.push((cert_key, cert.clone()));
                     }
                 }
 
                 // Store original precert if present
                 if let Some(precert) = &log_entry.original_precert {
                     let precert_hash = DeduplicatedLogEntry::hash_certificate(precert);
-                    let cert_key = format!("{}:{}", KeyPrefix::CERT, hex::encode(precert_hash));
-                    additional_data.push((cert_key.into_bytes(), precert.clone()));
+                    let mut cert_key = Vec::with_capacity(KeyPrefix::CERT.len() + 32);
+                    cert_key.extend_from_slice(KeyPrefix::CERT);
+                    cert_key.extend_from_slice(&precert_hash);
+                    additional_data.push((cert_key, precert.clone()));
                 }
             }
 
@@ -486,13 +489,15 @@ impl CtStorage {
         );
     }
 
-    pub async fn get(&self, key: &str) -> Result<Option<Bytes>> {
-        Ok(self.db.get(key.as_bytes()).await?)
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        Ok(self.db.get(key).await?)
     }
 
     /// Find index by hash
     pub async fn find_index_by_hash(&self, hash: &[u8]) -> Result<Option<u64>> {
-        let hash_key = format!("{}:{}", KeyPrefix::HASH_INDEX, hex::encode(hash));
+        let mut hash_key = Vec::with_capacity(KeyPrefix::HASH_INDEX.len() + hash.len());
+        hash_key.extend_from_slice(KeyPrefix::HASH_INDEX);
+        hash_key.extend_from_slice(hash);
         match self.get(&hash_key).await? {
             Some(bytes) => {
                 let index_array: [u8; 8] = bytes
@@ -510,7 +515,9 @@ impl CtStorage {
         &self,
         cert_hash: &[u8; 32],
     ) -> Result<Option<CertificateSctEntry>> {
-        let key = format!("{}:{}", KeyPrefix::CERT_SCT, hex::encode(cert_hash));
+        let mut key = Vec::with_capacity(KeyPrefix::CERT_SCT.len() + 32);
+        key.extend_from_slice(KeyPrefix::CERT_SCT);
+        key.extend_from_slice(cert_hash);
         match self.get(&key).await? {
             Some(bytes) => {
                 let entry: CertificateSctEntry =
@@ -530,7 +537,9 @@ impl CtStorage {
 
     /// Get a certificate by its hash
     pub async fn get_certificate(&self, cert_hash: &[u8]) -> Result<Option<Vec<u8>>> {
-        let key = format!("{}:{}", KeyPrefix::CERT, hex::encode(cert_hash));
+        let mut key = Vec::with_capacity(KeyPrefix::CERT.len() + cert_hash.len());
+        key.extend_from_slice(KeyPrefix::CERT);
+        key.extend_from_slice(cert_hash);
         match self.get(&key).await? {
             Some(bytes) => Ok(Some(bytes.to_vec())),
             None => Ok(None),
@@ -539,7 +548,9 @@ impl CtStorage {
 
     /// Get a deduplicated log entry by index
     pub async fn get_deduplicated_entry(&self, index: u64) -> Result<Option<DeduplicatedLogEntry>> {
-        let key = format!("{}:{}", KeyPrefix::ENTRY, index);
+        let mut key = Vec::with_capacity(KeyPrefix::ENTRY.len() + 8);
+        key.extend_from_slice(KeyPrefix::ENTRY);
+        key.extend_from_slice(&index.to_be_bytes());
         match self.get(&key).await? {
             Some(bytes) => {
                 let entry: DeduplicatedLogEntry =
@@ -590,21 +601,15 @@ impl CtStorage {
         );
 
         let certificate = main_cert_result?.ok_or_else(|| {
-            StorageError::InvalidFormat(format!(
-                "Certificate not found: {}",
-                hex::encode(&dedup_entry.certificate_hash)
-            ))
+            StorageError::InvalidFormat("Certificate not found".to_string())
         })?;
 
         let chain = match chain_results {
             Some(results) => {
-                let mut chain_certs = Vec::new();
-                for (i, result) in results.into_iter().enumerate() {
+             let mut chain_certs = Vec::new();
+                for (_i, result) in results.into_iter().enumerate() {
                     let cert = result?.ok_or_else(|| {
-                        StorageError::InvalidFormat(format!(
-                            "Chain certificate not found: {}",
-                            hex::encode(&dedup_entry.chain_hashes.as_ref().unwrap()[i])
-                        ))
+                        StorageError::InvalidFormat("Chain certificate not found".to_string())
                     })?;
                     chain_certs.push(cert);
                 }
@@ -615,10 +620,7 @@ impl CtStorage {
 
         let original_precert = match precert_result {
             Some(result) => Some(result?.ok_or_else(|| {
-                StorageError::InvalidFormat(format!(
-                    "Original precert not found: {}",
-                    hex::encode(dedup_entry.original_precert_hash.as_ref().unwrap())
-                ))
+                StorageError::InvalidFormat("Original precert not found".to_string())
             })?),
             None => None,
         };
