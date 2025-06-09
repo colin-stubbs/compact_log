@@ -98,6 +98,7 @@ impl KeyPrefix {
 }
 
 /// Storage backend for Certificate Transparency log using SlateDB with batching
+#[derive(Clone)]
 pub struct CtStorage {
     pub(crate) db: Arc<Db>,
     batch_sender: mpsc::Sender<BatchEntry>,
@@ -826,5 +827,673 @@ impl CtStorage {
                 tracing::warn!("Queue utilization high: {}%", utilization_percent as u32);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{sct::SctVersion, LogEntryType, LogId};
+    use chrono::{TimeZone, Utc};
+    use object_store::memory::InMemory;
+
+    // Helper functions for creating test data
+    fn create_test_log_entry(index: u64) -> LogEntry {
+        let timestamp = Utc
+            .timestamp_millis_opt(1234567890000 + (index as i64 * 1000))
+            .unwrap();
+        let certificate = vec![0x01, 0x02, 0x03, index as u8];
+        let chain = Some(vec![vec![0x04, 0x05], vec![0x06, 0x07]]);
+
+        LogEntry::new_with_timestamp(index, certificate, chain, timestamp)
+    }
+
+    fn create_test_sct(log_id: LogId, timestamp: u64) -> SignedCertificateTimestamp {
+        SignedCertificateTimestamp {
+            version: SctVersion::V1,
+            log_id,
+            timestamp,
+            extensions: vec![],
+            signature: vec![0xaa, 0xbb, 0xcc],
+        }
+    }
+
+    fn create_test_log_id() -> LogId {
+        LogId::new(&[0x42; 32])
+    }
+
+    async fn create_test_storage(config: BatchConfig) -> (CtStorage, StorageBackedMerkleTree) {
+        let object_store = Arc::new(InMemory::new());
+        let db = Arc::new(Db::open("test", object_store).await.unwrap());
+        let merkle_tree = StorageBackedMerkleTree::new(db.clone()).await.unwrap();
+        let storage = CtStorage::new(db.clone(), config, merkle_tree.clone())
+            .await
+            .unwrap();
+
+        (storage, merkle_tree)
+    }
+
+    #[tokio::test]
+    async fn test_add_and_retrieve_entry() {
+        let config = BatchConfig {
+            max_batch_size: 1,
+            max_batch_timeout_ms: 100,
+        };
+        let (storage, _tree) = create_test_storage(config).await;
+
+        let log_entry = create_test_log_entry(0);
+        let cert_hash = DeduplicatedLogEntry::hash_certificate(&log_entry.certificate);
+        let log_id = create_test_log_id();
+        let sct = create_test_sct(log_id, 1234567890000);
+
+        let index = storage
+            .add_entry_batched(log_entry.clone(), cert_hash, sct)
+            .await
+            .unwrap();
+        assert_eq!(index, 0);
+
+        // Retrieve entry
+        let retrieved = storage.get_entry(index).await.unwrap().unwrap();
+        assert_eq!(retrieved.index, log_entry.index);
+        assert_eq!(retrieved.certificate, log_entry.certificate);
+        assert_eq!(retrieved.timestamp, log_entry.timestamp);
+    }
+
+    #[tokio::test]
+    async fn test_batch_processing() {
+        let config = BatchConfig {
+            max_batch_size: 3,
+            max_batch_timeout_ms: 1000,
+        };
+        let (storage, _tree) = create_test_storage(config).await;
+
+        let log_id = create_test_log_id();
+        let mut handles = vec![];
+
+        // Add multiple entries concurrently
+        for i in 0..3 {
+            let storage_clone = storage.clone();
+            let log_entry = create_test_log_entry(i);
+            let cert_hash = DeduplicatedLogEntry::hash_certificate(&log_entry.certificate);
+            let sct = create_test_sct(log_id.clone(), 1234567890000 + i);
+
+            let handle: tokio::task::JoinHandle<Result<u64>> = tokio::spawn(async move {
+                storage_clone
+                    .add_entry_batched(log_entry, cert_hash, sct)
+                    .await
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all to complete
+        let mut results = vec![];
+        for handle in handles {
+            results.push(handle.await.unwrap().unwrap());
+        }
+
+        // Check that indices are sequential
+        results.sort();
+        assert_eq!(results, vec![0, 1, 2]);
+
+        // Verify all entries exist
+        for i in 0..3 {
+            let entry = storage.get_entry(i).await.unwrap().unwrap();
+            assert_eq!(entry.index, i);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_timeout_based_flush() {
+        let config = BatchConfig {
+            max_batch_size: 100, // Large enough to not trigger size-based flush
+            max_batch_timeout_ms: 200,
+        };
+        let (storage, _tree) = create_test_storage(config).await;
+
+        let log_entry = create_test_log_entry(0);
+        let cert_hash = DeduplicatedLogEntry::hash_certificate(&log_entry.certificate);
+        let log_id = create_test_log_id();
+        let sct = create_test_sct(log_id, 1234567890000);
+
+        // Add single entry
+        let index = storage
+            .add_entry_batched(log_entry, cert_hash, sct)
+            .await
+            .unwrap();
+        assert_eq!(index, 0);
+
+        // Wait for timeout-based flush
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+        // Verify entry was flushed
+        let entry = storage.get_entry(0).await.unwrap();
+        assert!(entry.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_certificate_deduplication() {
+        let config = BatchConfig {
+            max_batch_size: 2,
+            max_batch_timeout_ms: 100,
+        };
+        let (storage, _tree) = create_test_storage(config).await;
+
+        let log_id = create_test_log_id();
+        let certificate = vec![0x01, 0x02, 0x03, 0x04];
+        let timestamp1 = Utc.timestamp_millis_opt(1234567890000).unwrap();
+        let timestamp2 = Utc.timestamp_millis_opt(1234567891000).unwrap();
+
+        // Create two entries with the same certificate
+        let entry1 = LogEntry::new_with_timestamp(0, certificate.clone(), None, timestamp1);
+        let entry2 = LogEntry::new_with_timestamp(1, certificate.clone(), None, timestamp2);
+
+        let cert_hash = DeduplicatedLogEntry::hash_certificate(&certificate);
+        let sct1 = create_test_sct(log_id.clone(), timestamp1.timestamp_millis() as u64);
+        let sct2 = create_test_sct(log_id.clone(), timestamp2.timestamp_millis() as u64);
+
+        // Add both entries
+        let index1 = storage
+            .add_entry_batched(entry1, cert_hash, sct1.clone())
+            .await
+            .unwrap();
+        let index2 = storage
+            .add_entry_batched(entry2, cert_hash, sct2.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(index1, 0);
+        assert_eq!(index2, 1);
+
+        // Check SCT deduplication - both should have SCT entries
+        let sct_entry1 = storage.get_sct_by_cert_hash(&cert_hash).await.unwrap();
+        assert!(sct_entry1.is_some());
+
+        // The certificate should only be stored once
+        let cert_data = storage.get_certificate(&cert_hash).await.unwrap();
+        assert!(cert_data.is_some());
+        assert_eq!(cert_data.unwrap(), certificate);
+    }
+
+    #[tokio::test]
+    async fn test_find_index_by_hash() {
+        let config = BatchConfig {
+            max_batch_size: 1,
+            max_batch_timeout_ms: 100,
+        };
+        let (storage, _tree) = create_test_storage(config).await;
+
+        let log_entry = create_test_log_entry(0);
+        let cert_hash = DeduplicatedLogEntry::hash_certificate(&log_entry.certificate);
+        let log_id = create_test_log_id();
+        let sct = create_test_sct(log_id, 1234567890000);
+
+        // Add entry
+        let index = storage
+            .add_entry_batched(log_entry.clone(), cert_hash, sct)
+            .await
+            .unwrap();
+
+        // Calculate leaf hash
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&[0x00]); // Leaf prefix
+        hasher.update(&log_entry.leaf_data);
+        let leaf_hash = hasher.finalize();
+
+        // Find index by hash
+        let found_index = storage.find_index_by_hash(&leaf_hash).await.unwrap();
+        assert_eq!(found_index, Some(index));
+
+        // Try non-existent hash
+        let random_hash = [0xff; 32];
+        let not_found = storage.find_index_by_hash(&random_hash).await.unwrap();
+        assert_eq!(not_found, None);
+    }
+
+    #[tokio::test]
+    async fn test_deduplicated_entry_serialization() {
+        let config = BatchConfig {
+            max_batch_size: 1,
+            max_batch_timeout_ms: 100,
+        };
+        let (storage, _tree) = create_test_storage(config).await;
+
+        let log_entry = create_test_log_entry(0);
+        let cert_hash = DeduplicatedLogEntry::hash_certificate(&log_entry.certificate);
+        let log_id = create_test_log_id();
+        let sct = create_test_sct(log_id, 1234567890000);
+
+        // Add entry
+        storage
+            .add_entry_batched(log_entry.clone(), cert_hash, sct)
+            .await
+            .unwrap();
+
+        // Get deduplicated entry
+        let dedup_entry = storage.get_deduplicated_entry(0).await.unwrap().unwrap();
+        assert_eq!(dedup_entry.index, 0);
+        assert_eq!(dedup_entry.certificate_hash, cert_hash);
+        assert_eq!(dedup_entry.entry_type, LogEntryType::X509Entry);
+    }
+
+    #[tokio::test]
+    async fn test_precert_entry_with_chain() {
+        let config = BatchConfig {
+            max_batch_size: 1,
+            max_batch_timeout_ms: 100,
+        };
+        let (storage, _tree) = create_test_storage(config).await;
+
+        let timestamp = Utc.timestamp_millis_opt(1234567890000).unwrap();
+        let certificate = vec![0x01, 0x02, 0x03, 0x04];
+        let chain = Some(vec![vec![0x05, 0x06], vec![0x07, 0x08]]);
+        let issuer_key_hash = vec![0xaa; 32];
+        let original_precert = vec![0x09, 0x0a, 0x0b];
+
+        let log_entry = LogEntry::new_precert_with_timestamp(
+            0,
+            certificate.clone(),
+            chain.clone(),
+            issuer_key_hash.clone(),
+            original_precert.clone(),
+            timestamp,
+        );
+
+        let cert_hash = DeduplicatedLogEntry::hash_certificate(&certificate);
+        let log_id = create_test_log_id();
+        let sct = create_test_sct(log_id, timestamp.timestamp_millis() as u64);
+
+        // Add entry
+        let index = storage
+            .add_entry_batched(log_entry, cert_hash, sct)
+            .await
+            .unwrap();
+
+        // Retrieve and verify
+        let retrieved = storage.get_entry(index).await.unwrap().unwrap();
+        assert_eq!(retrieved.entry_type, LogEntryType::PrecertEntry);
+        assert_eq!(retrieved.issuer_key_hash, Some(issuer_key_hash));
+        assert_eq!(retrieved.original_precert, Some(original_precert));
+        assert_eq!(retrieved.chain, chain);
+    }
+
+    #[tokio::test]
+    async fn test_reconstruct_log_entry_missing_certificate() {
+        let config = BatchConfig::default();
+        let (storage, _tree) = create_test_storage(config).await;
+
+        let dedup_entry = DeduplicatedLogEntry {
+            index: 0,
+            timestamp: Utc::now(),
+            entry_type: LogEntryType::X509Entry,
+            certificate_hash: [0xff; 32], // Non-existent certificate
+            chain_hashes: None,
+            issuer_key_hash: None,
+            original_precert_hash: None,
+            leaf_data: vec![],
+        };
+
+        let result = storage.reconstruct_log_entry(&dedup_entry).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            StorageError::InvalidFormat(msg) => assert!(msg.contains("Certificate not found")),
+            _ => panic!("Wrong error type"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_operations_on_non_existent_entries() {
+        let config = BatchConfig::default();
+        let (storage, _tree) = create_test_storage(config).await;
+
+        // Test get non-existent entry
+        let entry = storage.get_entry(999).await.unwrap();
+        assert!(entry.is_none());
+
+        // Test get non-existent deduplicated entry
+        let dedup_entry = storage.get_deduplicated_entry(999).await.unwrap();
+        assert!(dedup_entry.is_none());
+
+        // Test get non-existent certificate
+        let cert = storage.get_certificate(&[0xff; 32]).await.unwrap();
+        assert!(cert.is_none());
+
+        // Test get non-existent SCT
+        let sct = storage.get_sct_by_cert_hash(&[0xff; 32]).await.unwrap();
+        assert!(sct.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_batch_failure_handling() {
+        // Test batch processing when some entries fail
+        let config = BatchConfig {
+            max_batch_size: 5,
+            max_batch_timeout_ms: 100,
+        };
+        let (storage, _tree) = create_test_storage(config).await;
+
+        let log_id = create_test_log_id();
+        let mut handles = vec![];
+
+        // Add entries where we simulate different scenarios
+        for i in 0..5 {
+            let storage_clone = storage.clone();
+            let timestamp = Utc.timestamp_millis_opt(1234567890000 + i).unwrap();
+
+            // Create entries with different characteristics
+            let (certificate, chain) = if i == 2 {
+                // Entry with very large certificate that might cause issues
+                (vec![0xff; 1_000_000], None)
+            } else {
+                (
+                    vec![0x01, 0x02, 0x03, i as u8],
+                    Some(vec![vec![0x04, 0x05]]),
+                )
+            };
+
+            let entry =
+                LogEntry::new_with_timestamp(i as u64, certificate.clone(), chain, timestamp);
+            let cert_hash = DeduplicatedLogEntry::hash_certificate(&certificate);
+            let sct = create_test_sct(log_id.clone(), timestamp.timestamp_millis() as u64);
+
+            let handle: tokio::task::JoinHandle<Result<u64>> = tokio::spawn(async move {
+                storage_clone.add_entry_batched(entry, cert_hash, sct).await
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all to complete
+        let mut successes = 0;
+        let mut failures = 0;
+
+        for handle in handles {
+            match handle.await.unwrap() {
+                Ok(_) => successes += 1,
+                Err(_) => failures += 1,
+            }
+        }
+
+        // All should succeed in this case (large certificates are valid)
+        assert_eq!(successes, 5);
+        assert_eq!(failures, 0);
+
+        // Verify all entries exist
+        for i in 0..5 {
+            let entry = storage.get_entry(i).await.unwrap();
+            assert!(entry.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_same_batch_deduplication() {
+        let config = BatchConfig {
+            max_batch_size: 5,
+            max_batch_timeout_ms: 100,
+        };
+        let (storage, _tree) = create_test_storage(config).await;
+
+        let log_id = create_test_log_id();
+        let certificate = vec![0x01, 0x02, 0x03, 0x04];
+        let cert_hash = DeduplicatedLogEntry::hash_certificate(&certificate);
+
+        // Add the same certificate multiple times in the same batch
+        let mut handles = vec![];
+        for i in 0..5 {
+            let storage_clone = storage.clone();
+            let timestamp = Utc.timestamp_millis_opt(1234567890000 + i).unwrap();
+            let entry =
+                LogEntry::new_with_timestamp(i as u64, certificate.clone(), None, timestamp);
+            let sct = create_test_sct(log_id.clone(), timestamp.timestamp_millis() as u64);
+
+            let handle: tokio::task::JoinHandle<Result<u64>> = tokio::spawn(async move {
+                storage_clone.add_entry_batched(entry, cert_hash, sct).await
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all to complete
+        let mut results = vec![];
+        for handle in handles {
+            results.push(handle.await.unwrap().unwrap());
+        }
+
+        // All should succeed with different indices
+        results.sort();
+        assert_eq!(results, vec![0, 1, 2, 3, 4]);
+
+        // The certificate should only be stored once
+        let cert_data = storage.get_certificate(&cert_hash).await.unwrap();
+        assert!(cert_data.is_some());
+        assert_eq!(cert_data.unwrap(), certificate);
+
+        // All entries should exist
+        for i in 0..5 {
+            let entry = storage.get_entry(i).await.unwrap();
+            assert!(entry.is_some());
+            assert_eq!(entry.unwrap().certificate, certificate);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sct_replacement_behavior() {
+        let config = BatchConfig {
+            max_batch_size: 1,
+            max_batch_timeout_ms: 100,
+        };
+        let (storage, _tree) = create_test_storage(config).await;
+
+        let log_id = create_test_log_id();
+        let certificate = vec![0x01, 0x02, 0x03, 0x04];
+        let cert_hash = DeduplicatedLogEntry::hash_certificate(&certificate);
+
+        // Add first entry with SCT
+        let timestamp1 = Utc.timestamp_millis_opt(1234567890000).unwrap();
+        let entry1 = LogEntry::new_with_timestamp(0, certificate.clone(), None, timestamp1);
+        let sct1 = create_test_sct(log_id.clone(), timestamp1.timestamp_millis() as u64);
+
+        let index1 = storage
+            .add_entry_batched(entry1, cert_hash, sct1.clone())
+            .await
+            .unwrap();
+
+        // Check first SCT
+        let sct_entry1 = storage
+            .get_sct_by_cert_hash(&cert_hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sct_entry1.index, index1);
+        assert_eq!(sct_entry1.timestamp, sct1.timestamp);
+
+        // Add second entry with same certificate but different SCT
+        let timestamp2 = Utc.timestamp_millis_opt(1234567891000).unwrap();
+        let entry2 = LogEntry::new_with_timestamp(1, certificate.clone(), None, timestamp2);
+        let sct2 = SignedCertificateTimestamp {
+            version: SctVersion::V1,
+            log_id: log_id.clone(),
+            timestamp: timestamp2.timestamp_millis() as u64,
+            extensions: vec![0xff],            // Different extensions
+            signature: vec![0xdd, 0xee, 0xff], // Different signature
+        };
+
+        let index2 = storage
+            .add_entry_batched(entry2, cert_hash, sct2.clone())
+            .await
+            .unwrap();
+
+        // Check SCT - it should be replaced with the latest one
+        let sct_entry2 = storage
+            .get_sct_by_cert_hash(&cert_hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sct_entry2.index, index2);
+        assert_eq!(sct_entry2.timestamp, sct2.timestamp);
+
+        // Both log entries should exist
+        let retrieved1 = storage.get_entry(index1).await.unwrap().unwrap();
+        let retrieved2 = storage.get_entry(index2).await.unwrap().unwrap();
+        assert_eq!(retrieved1.certificate, certificate);
+        assert_eq!(retrieved2.certificate, certificate);
+    }
+
+    #[tokio::test]
+    async fn test_chain_reconstruction_failures() {
+        let config = BatchConfig {
+            max_batch_size: 1,
+            max_batch_timeout_ms: 100,
+        };
+        let (storage, _tree) = create_test_storage(config).await;
+
+        // Create an entry with a chain
+        let timestamp = Utc.timestamp_millis_opt(1234567890000).unwrap();
+        let certificate = vec![0x01, 0x02, 0x03, 0x04];
+        let chain = Some(vec![vec![0x05, 0x06], vec![0x07, 0x08], vec![0x09, 0x0a]]);
+        let entry = LogEntry::new_with_timestamp(0, certificate.clone(), chain.clone(), timestamp);
+
+        let cert_hash = DeduplicatedLogEntry::hash_certificate(&certificate);
+        let log_id = create_test_log_id();
+        let sct = create_test_sct(log_id, timestamp.timestamp_millis() as u64);
+
+        // Add entry
+        let index = storage
+            .add_entry_batched(entry, cert_hash, sct)
+            .await
+            .unwrap();
+
+        // Get the deduplicated entry
+        let dedup_entry = storage
+            .get_deduplicated_entry(index)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Manually create a corrupted deduplicated entry with missing chain certificates
+        let corrupted_dedup = DeduplicatedLogEntry {
+            index: dedup_entry.index,
+            timestamp: dedup_entry.timestamp,
+            entry_type: dedup_entry.entry_type,
+            certificate_hash: dedup_entry.certificate_hash,
+            chain_hashes: Some(vec![
+                dedup_entry.chain_hashes.as_ref().unwrap()[0], // First cert exists
+                [0xff; 32],                                    // Second cert missing
+                dedup_entry.chain_hashes.as_ref().unwrap()[2], // Third cert exists
+            ]),
+            issuer_key_hash: None,
+            original_precert_hash: None,
+            leaf_data: dedup_entry.leaf_data.clone(),
+        };
+
+        // Try to reconstruct - should fail
+        let result = storage.reconstruct_log_entry(&corrupted_dedup).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            StorageError::InvalidFormat(msg) => {
+                assert!(msg.contains("Chain certificate not found"))
+            }
+            _ => panic!("Wrong error type"),
+        }
+
+        // Test with partially missing chain (only some certificates exist)
+        let partial_dedup = DeduplicatedLogEntry {
+            index: dedup_entry.index,
+            timestamp: dedup_entry.timestamp,
+            entry_type: dedup_entry.entry_type,
+            certificate_hash: dedup_entry.certificate_hash,
+            chain_hashes: Some(vec![
+                dedup_entry.chain_hashes.as_ref().unwrap()[0], // Only first cert
+            ]),
+            issuer_key_hash: None,
+            original_precert_hash: None,
+            leaf_data: dedup_entry.leaf_data,
+        };
+
+        // This should succeed but with shorter chain
+        let partial_result = storage.reconstruct_log_entry(&partial_dedup).await.unwrap();
+        assert_eq!(partial_result.chain.as_ref().unwrap().len(), 1);
+        assert_eq!(partial_result.chain.as_ref().unwrap()[0], vec![0x05, 0x06]);
+    }
+
+    #[tokio::test]
+    async fn test_deduplication_with_chain_and_precert() {
+        let config = BatchConfig {
+            max_batch_size: 2,
+            max_batch_timeout_ms: 100,
+        };
+        let (storage, _tree) = create_test_storage(config).await;
+
+        let log_id = create_test_log_id();
+        let certificate = vec![0x01, 0x02, 0x03, 0x04];
+        let chain_cert1 = vec![0x05, 0x06];
+        let chain_cert2 = vec![0x07, 0x08];
+        let original_precert = vec![0x09, 0x0a];
+
+        // Create two precert entries that share chain certificates
+        let timestamp1 = Utc.timestamp_millis_opt(1234567890000).unwrap();
+        let entry1 = LogEntry::new_precert_with_timestamp(
+            0,
+            certificate.clone(),
+            Some(vec![chain_cert1.clone(), chain_cert2.clone()]),
+            vec![0xaa; 32],
+            original_precert.clone(),
+            timestamp1,
+        );
+
+        let timestamp2 = Utc.timestamp_millis_opt(1234567891000).unwrap();
+        let different_cert = vec![0x11, 0x12, 0x13, 0x14];
+        let entry2 = LogEntry::new_precert_with_timestamp(
+            1,
+            different_cert.clone(),
+            Some(vec![chain_cert1.clone(), chain_cert2.clone()]), // Same chain
+            vec![0xbb; 32],
+            original_precert.clone(), // Same precert
+            timestamp2,
+        );
+
+        // Add both entries
+        let cert_hash1 = DeduplicatedLogEntry::hash_certificate(&certificate);
+        let cert_hash2 = DeduplicatedLogEntry::hash_certificate(&different_cert);
+        let sct1 = create_test_sct(log_id.clone(), timestamp1.timestamp_millis() as u64);
+        let sct2 = create_test_sct(log_id.clone(), timestamp2.timestamp_millis() as u64);
+
+        let index1 = storage
+            .add_entry_batched(entry1, cert_hash1, sct1)
+            .await
+            .unwrap();
+        let index2 = storage
+            .add_entry_batched(entry2, cert_hash2, sct2)
+            .await
+            .unwrap();
+
+        // Check that chain certificates and precert are deduplicated
+        let chain_hash1 = DeduplicatedLogEntry::hash_certificate(&chain_cert1);
+        let chain_hash2 = DeduplicatedLogEntry::hash_certificate(&chain_cert2);
+        let precert_hash = DeduplicatedLogEntry::hash_certificate(&original_precert);
+
+        // Each should be stored only once
+        assert!(storage
+            .get_certificate(&chain_hash1)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_certificate(&chain_hash2)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_certificate(&precert_hash)
+            .await
+            .unwrap()
+            .is_some());
+
+        // Both entries should reconstruct correctly
+        let retrieved1 = storage.get_entry(index1).await.unwrap().unwrap();
+        let retrieved2 = storage.get_entry(index2).await.unwrap().unwrap();
+
+        assert_eq!(retrieved1.chain.as_ref().unwrap().len(), 2);
+        assert_eq!(retrieved2.chain.as_ref().unwrap().len(), 2);
+        assert_eq!(retrieved1.original_precert, Some(original_precert.clone()));
+        assert_eq!(retrieved2.original_precert, Some(original_precert));
     }
 }
