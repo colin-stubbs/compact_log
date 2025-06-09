@@ -1,6 +1,7 @@
 use crate::merkle_storage::StorageBackedMerkleTree;
 use crate::types::{sct::SignedCertificateTimestamp, DeduplicatedLogEntry, LogEntry};
 use bytes::Bytes;
+use futures::future::{join_all, OptionFuture};
 use serde::{Deserialize, Serialize};
 use slatedb::Db;
 use std::sync::Arc;
@@ -561,44 +562,65 @@ impl CtStorage {
         &self,
         dedup_entry: &DeduplicatedLogEntry,
     ) -> Result<LogEntry> {
-        // Retrieve the main certificate
-        let certificate = self
-            .get_certificate(&dedup_entry.certificate_hash)
-            .await?
-            .ok_or_else(|| {
-                StorageError::InvalidFormat(format!(
-                    "Certificate not found: {}",
-                    hex::encode(&dedup_entry.certificate_hash)
-                ))
-            })?;
+        let main_cert_fut = self.get_certificate(&dedup_entry.certificate_hash);
 
-        // Retrieve chain certificates if present
-        let chain = if let Some(chain_hashes) = &dedup_entry.chain_hashes {
-            let mut chain_certs = Vec::new();
-            for hash in chain_hashes {
-                let cert = self.get_certificate(hash).await?.ok_or_else(|| {
-                    StorageError::InvalidFormat(format!(
-                        "Chain certificate not found: {}",
-                        hex::encode(hash)
-                    ))
-                })?;
-                chain_certs.push(cert);
+        let chain_futs = dedup_entry.chain_hashes.as_ref().map(|hashes| {
+            hashes
+                .iter()
+                .map(|hash| self.get_certificate(hash))
+                .collect::<Vec<_>>()
+        });
+
+        let precert_fut = OptionFuture::from(
+            dedup_entry
+                .original_precert_hash
+                .as_ref()
+                .map(|hash| self.get_certificate(hash)),
+        );
+
+        let (main_cert_result, chain_results, precert_result) = tokio::join!(
+            main_cert_fut,
+            async {
+                match chain_futs {
+                    Some(futs) => Some(join_all(futs).await),
+                    None => None,
+                }
+            },
+            precert_fut
+        );
+
+        let certificate = main_cert_result?.ok_or_else(|| {
+            StorageError::InvalidFormat(format!(
+                "Certificate not found: {}",
+                hex::encode(&dedup_entry.certificate_hash)
+            ))
+        })?;
+
+        let chain = match chain_results {
+            Some(results) => {
+                let mut chain_certs = Vec::new();
+                for (i, result) in results.into_iter().enumerate() {
+                    let cert = result?.ok_or_else(|| {
+                        StorageError::InvalidFormat(format!(
+                            "Chain certificate not found: {}",
+                            hex::encode(&dedup_entry.chain_hashes.as_ref().unwrap()[i])
+                        ))
+                    })?;
+                    chain_certs.push(cert);
+                }
+                Some(chain_certs)
             }
-            Some(chain_certs)
-        } else {
-            None
+            None => None,
         };
 
-        // Retrieve original precert if present
-        let original_precert = if let Some(precert_hash) = &dedup_entry.original_precert_hash {
-            Some(self.get_certificate(precert_hash).await?.ok_or_else(|| {
+        let original_precert = match precert_result {
+            Some(result) => Some(result?.ok_or_else(|| {
                 StorageError::InvalidFormat(format!(
                     "Original precert not found: {}",
-                    hex::encode(precert_hash)
+                    hex::encode(dedup_entry.original_precert_hash.as_ref().unwrap())
                 ))
-            })?)
-        } else {
-            None
+            })?),
+            None => None,
         };
 
         Ok(LogEntry {

@@ -464,16 +464,28 @@ pub async fn get_entries(
     let count = (params.end - params.start + 1).min(MAX_ENTRIES);
     let end = params.start + count - 1;
 
-    // Fetch all entries in parallel
+    let storage = state.storage.clone();
     let futures: Vec<_> = (params.start..=end)
-        .map(|i| state.storage.get_entry(i))
+        .map(|i| {
+            let storage = storage.clone();
+            tokio::spawn(async move { storage.get_entry(i).await })
+        })
         .collect();
 
     let results = futures::future::join_all(futures).await;
 
     let mut entries = Vec::new();
 
-    for (_idx, result) in results.into_iter().enumerate() {
+    for (_idx, join_result) in results.into_iter().enumerate() {
+        let result = join_result.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Task join error: {}", e),
+                }),
+            )
+        })?;
+
         if let Some(log_entry) =
             result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?
         {
