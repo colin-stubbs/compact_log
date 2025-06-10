@@ -38,7 +38,7 @@ chrono = "0.4"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 signature = "2.2"
 toml = "0.8"
-config = "0.14"
+config = "0.15"
 rand = "0.8"
 mimalloc = "0.1"
 subtle = "2.5"
