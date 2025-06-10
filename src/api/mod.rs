@@ -10,7 +10,7 @@ use crate::{
     merkle_storage::StorageBackedMerkleTree,
     storage::CtStorage,
     types::{sct::SctBuilder, tree_head::SthBuilder, LogId},
-    validation::CertificateValidator,
+    validation::Rfc6962Validator,
 };
 
 pub mod handlers;
@@ -20,7 +20,7 @@ pub struct ApiState {
     pub merkle_tree: StorageBackedMerkleTree,
     pub sct_builder: Arc<SctBuilder>,
     pub sth_builder: Arc<SthBuilder>,
-    pub validator: Option<Arc<CertificateValidator>>,
+    pub validator: Option<Arc<Rfc6962Validator>>,
 }
 
 impl ApiState {
@@ -29,7 +29,7 @@ impl ApiState {
         merkle_tree: StorageBackedMerkleTree,
         log_id: LogId,
         private_key: Vec<u8>,
-        validator: Option<Arc<CertificateValidator>>,
+        validator: Option<Arc<Rfc6962Validator>>,
     ) -> crate::types::Result<Self> {
         let sct_builder = Arc::new(SctBuilder::from_private_key_bytes(
             log_id.clone(),

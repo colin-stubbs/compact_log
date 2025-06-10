@@ -26,8 +26,10 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 mod api;
+mod ccadb;
 mod merkle_storage;
 mod merkle_tree;
+mod oids;
 mod storage;
 mod types;
 mod validation;
@@ -36,9 +38,10 @@ mod validation;
 mod test_utils;
 
 use api::{create_router, ApiState};
+use ccadb::{CcadbWorker, RootCertificateStore};
 use storage::{BatchConfig, CtStorage};
 use types::LogId;
-use validation::{CertificateValidator, ValidationConfig};
+use validation::{CcadbEnvironment, Rfc6962ValidationConfig, Rfc6962Validator};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct StorageConfig {
@@ -73,8 +76,8 @@ struct AppConfig {
     server: ServerConfig,
     storage: StorageConfig,
     keys: KeysConfig,
-    validation: Option<ValidationConfig>,
     cache: Option<CacheConfig>,
+    validation: Option<ValidationConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -89,6 +92,22 @@ struct KeysConfig {
 }
 
 const DEFAULT_MEMORY_BLOCK_CACHE_CAPACITY_MB: u64 = 64; // 64 MB default
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ValidationConfig {
+    enabled: bool,
+    ccadb: String, // "Production" or "Test"
+    #[serde(default = "default_trusted_roots_dir")]
+    trusted_roots_dir: String,
+    temporal_window_start: Option<String>,
+    temporal_window_end: Option<String>,
+    max_chain_length: Option<usize>,
+    allowed_signature_algorithms: Option<Vec<String>>,
+}
+
+fn default_trusted_roots_dir() -> String {
+    "trusted_roots".to_string()
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct CacheConfig {
@@ -149,16 +168,103 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("CT storage created");
 
-    // Initialize certificate validator if validation is configured
-    let validator = match config.validation {
-        Some(validation_config) => {
-            info!("Certificate validation enabled");
-            Some(Arc::new(CertificateValidator::new(validation_config)?))
-        }
-        None => {
-            info!("Certificate validation disabled");
+    // Initialize validation if configured
+    let validator = if let Some(validation_config) = &config.validation {
+        if !validation_config.enabled {
+            info!("Validation is disabled in configuration");
             None
+        } else {
+            // Parse the CCADB environment
+            let ccadb_env = match validation_config.ccadb.to_lowercase().as_str() {
+                "production" => CcadbEnvironment::Production,
+                "test" => CcadbEnvironment::Test,
+                _ => {
+                    return Err(format!(
+                        "Invalid CCADB environment '{}'. Must be 'Production' or 'Test'",
+                        validation_config.ccadb
+                    )
+                    .into());
+                }
+            };
+
+            // Initialize the shared root certificate store
+            let root_store = RootCertificateStore::new();
+
+            // Parse temporal window if configured
+            let temporal_window = match (
+                &validation_config.temporal_window_start,
+                &validation_config.temporal_window_end,
+            ) {
+                (Some(start), Some(end)) => {
+                    use crate::validation::rfc6962_validator::TemporalWindow;
+                    use chrono::DateTime;
+
+                    let start_dt = DateTime::parse_from_rfc3339(start)
+                        .map_err(|e| format!("Failed to parse temporal_window_start: {}", e))?
+                        .with_timezone(&chrono::Utc);
+                    let end_dt = DateTime::parse_from_rfc3339(end)
+                        .map_err(|e| format!("Failed to parse temporal_window_end: {}", e))?
+                        .with_timezone(&chrono::Utc);
+
+                    Some(TemporalWindow {
+                        start: start_dt,
+                        end: end_dt,
+                    })
+                }
+                _ => None,
+            };
+
+            let rfc6962_config = Rfc6962ValidationConfig {
+                trusted_roots_dir: PathBuf::from(&validation_config.trusted_roots_dir),
+                ccadb: ccadb_env,
+                max_chain_length: validation_config.max_chain_length.unwrap_or(10),
+                temporal_window,
+                ..Default::default()
+            };
+
+            // Load existing certificates from disk
+            root_store
+                .load_from_directory(&rfc6962_config.trusted_roots_dir)
+                .await?;
+            info!(
+                "Loaded {} root certificates from disk",
+                root_store.count().await
+            );
+
+            // Start the CCADB worker to fetch and update certificates
+            let ccadb_worker = CcadbWorker::new(
+                rfc6962_config.ccadb,
+                root_store.clone(),
+                rfc6962_config.trusted_roots_dir.clone(),
+            );
+
+            // Spawn the worker to run periodically (every hour)
+            let _worker_handle = tokio::spawn(async move {
+                // Do an initial update
+                if let Err(e) = ccadb_worker.update().await {
+                    tracing::error!("Initial CCADB update failed: {}", e);
+                }
+
+                // Then run periodically
+                ccadb_worker.run_periodic(Duration::from_secs(3600)).await;
+            });
+
+            // Create validator with the shared root store
+            let trusted_roots = root_store.get_all_certificates().await;
+            let validator = Arc::new(Rfc6962Validator::with_trusted_roots(
+                rfc6962_config,
+                trusted_roots,
+            )?);
+            info!(
+                "RFC 6962 validator initialized with {} trusted roots",
+                root_store.count().await
+            );
+
+            Some(validator)
         }
+    } else {
+        info!("No validation configured, running without certificate validation");
+        None
     };
 
     let private_key_bytes = private_key.to_bytes().to_vec();
@@ -214,8 +320,16 @@ async fn initialize_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
             private_key_path: "keys/private_key.pem".to_string(),
             public_key_path: "keys/public_key.pem".to_string(),
         },
-        validation: None,
         cache: None,
+        validation: Some(ValidationConfig {
+            enabled: true,
+            ccadb: "Production".to_string(),
+            trusted_roots_dir: "trusted_roots".to_string(),
+            temporal_window_start: None,
+            temporal_window_end: None,
+            max_chain_length: Some(10),
+            allowed_signature_algorithms: None,
+        }),
     };
 
     fs::create_dir_all("keys")?;

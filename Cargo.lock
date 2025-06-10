@@ -344,7 +344,9 @@ dependencies = [
  "sha2",
  "signature",
  "slatedb",
+ "spki",
  "subtle",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "toml",
@@ -2550,6 +2552,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3731,6 +3744,8 @@ checksum = "1301e935010a701ae5f8655edc0ad17c44bad3ac5ce8c39185f75453b720ae94"
 dependencies = [
  "const-oid",
  "der",
+ "sha1",
+ "signature",
  "spki",
  "tls_codec",
 ]

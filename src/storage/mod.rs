@@ -1,5 +1,6 @@
 use crate::merkle_storage::StorageBackedMerkleTree;
 use crate::types::{sct::SignedCertificateTimestamp, DeduplicatedLogEntry, LogEntry};
+use crate::validation::tbs_extractor::TbsExtractor;
 use bytes::Bytes;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -656,7 +657,6 @@ impl CtStorage {
         &self,
         dedup_entry: &DeduplicatedLogEntry,
     ) -> Result<LogEntry> {
-        use crate::types::LogEntry as LogEntryType;
         let (certificate, original_precert) = if dedup_entry.entry_type
             == crate::types::LogEntryType::PrecertEntry
         {
@@ -704,11 +704,10 @@ impl CtStorage {
                 None => Vec::new(),
             };
 
-            let tbs_certificate =
-                LogEntryType::remove_poison_extension_and_transform(&precert_result, &chain)
-                    .map_err(|e| {
-                        StorageError::InvalidFormat(format!("Failed to transform precert: {}", e))
-                    })?;
+            let tbs_certificate = TbsExtractor::extract_tbs_certificate(&precert_result, &chain)
+                .map_err(|e| {
+                    StorageError::InvalidFormat(format!("Failed to transform precert: {}", e))
+                })?;
 
             (tbs_certificate, Some(precert_result))
         } else {
@@ -903,11 +902,10 @@ mod tests {
         // For precertificates, the chain includes [precert, issuer]
         let full_chain = vec![original_precert_der.clone(), issuer_cert_der.clone()];
 
-        let issuer_key_hash: Vec<u8> = LogEntry::extract_issuer_key_hash(&full_chain).unwrap();
+        let issuer_key_hash: Vec<u8> = crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain);
 
         let tbs_certificate =
-            LogEntry::remove_poison_extension_and_transform(&original_precert_der, &full_chain)
-                .unwrap();
+            TbsExtractor::extract_tbs_certificate(&original_precert_der, &full_chain).unwrap();
 
         let timestamp = Utc.timestamp_millis_opt(1234567890000).unwrap();
 
@@ -1539,18 +1537,18 @@ mod tests {
         let issuer_cert = crate::test_utils::test_utils::create_test_certificate();
 
         let precert1 = crate::test_utils::test_utils::create_precertificate_with_poison();
-        let precert2 = crate::test_utils::test_utils::create_test_certificate_with_serial(3); // Different cert
-
-        // For the test, we'll treat both as precerts even though precert2 doesn't have poison
-        // This is just for testing deduplication logic
+        let precert2 =
+            crate::test_utils::test_utils::create_precertificate_with_poison_and_serial(3); // Different precert
 
         let full_chain = vec![precert1.clone(), issuer_cert.clone()];
-        let issuer_key_hash1 = LogEntry::extract_issuer_key_hash(&full_chain).unwrap();
-        let tbs1 = LogEntry::remove_poison_extension_and_transform(&precert1, &full_chain).unwrap();
+        let issuer_key_hash1 = crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain);
+        let tbs1 =
+            TbsExtractor::extract_tbs_certificate(&precert1, &vec![issuer_cert.clone()]).unwrap();
 
         let full_chain2 = vec![precert2.clone(), issuer_cert.clone()];
-        let issuer_key_hash2 = LogEntry::extract_issuer_key_hash(&full_chain2).unwrap();
-        let tbs2 = vec![0x20, 0x21, 0x22]; // Mock TBS for second entry
+        let issuer_key_hash2 = crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain2);
+        let tbs2 =
+            TbsExtractor::extract_tbs_certificate(&precert2, &vec![issuer_cert.clone()]).unwrap();
 
         let timestamp1 = Utc.timestamp_millis_opt(1234567890000).unwrap();
         let entry1 = LogEntry::new_precert_with_timestamp(

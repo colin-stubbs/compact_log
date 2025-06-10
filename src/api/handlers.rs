@@ -6,6 +6,7 @@ use crate::{
         GetEntriesRequest, GetEntriesResponse, GetProofByHashRequest, GetProofByHashResponse,
         LeafEntry,
     },
+    validation::TbsExtractor,
 };
 use axum::{
     extract::{Query, State},
@@ -64,7 +65,7 @@ pub async fn add_chain(
         )
     })?;
 
-    // Validate certificate chain if validator is configured
+    // Validate certificate chain
     if let Some(validator) = &state.validator {
         validator.validate_chain(&chain).map_err(|e| {
             (
@@ -254,7 +255,6 @@ pub async fn add_pre_chain(
     let mut complete_chain = vec![precert_der.clone()];
     complete_chain.extend(processed_chain.clone());
 
-    // Validate certificate chain if validator is configured
     if let Some(validator) = &state.validator {
         validator.validate_chain(&complete_chain).map_err(|e| {
             (
@@ -266,23 +266,36 @@ pub async fn add_pre_chain(
         })?;
     }
 
-    let issuer_key_hash = LogEntry::extract_issuer_key_hash(&complete_chain).map_err(|e| {
-        (
+    let issuer_key_hash = if let Some(validator) = &state.validator {
+        validator
+            .extract_issuer_key_hash(&complete_chain)
+            .map(|hash| hash.to_vec())
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?
+    } else {
+        return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Precertificate validation requires a configured validator".to_string(),
             }),
-        )
-    })?;
+        ));
+    };
 
-    let tbs_certificate = LogEntry::remove_poison_extension_and_transform(&precert_der, &complete_chain).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    let tbs_certificate = TbsExtractor::extract_tbs_certificate(&precert_der, &processed_chain)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
 
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -582,22 +595,14 @@ pub async fn get_entries(
 pub async fn get_roots(State(state): State<Arc<ApiState>>) -> ApiResult<GetRootsResponse> {
     if let Some(validator) = &state.validator {
         let root_certs = validator
-            .get_accepted_root_certificates()
+            .get_accepted_roots()
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
-
-        let (start_time, end_time) = validator.get_temporal_window();
 
         // Convert DER certificates to base64
         let certificates = root_certs
             .into_iter()
             .map(|cert_der| BASE64.encode(&cert_der))
             .collect();
-
-        tracing::debug!(
-            "Certificate acceptance window: {} to {}",
-            start_time.format("%Y-%m-%d %H:%M:%S UTC"),
-            end_time.format("%Y-%m-%d %H:%M:%S UTC")
-        );
 
         Ok(Json(GetRootsResponse { certificates }))
     } else {
