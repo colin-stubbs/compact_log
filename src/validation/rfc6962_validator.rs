@@ -341,15 +341,14 @@ impl Rfc6962Validator {
         // Check if the last certificate is a trusted root
         let last_cert_hash = Self::certificate_hash(last_cert)?;
         let last_cert_fingerprint = hex::encode(&last_cert_hash);
-        
+
         tracing::debug!(
             "Last certificate fingerprint: {}, subject: {}",
             &last_cert_fingerprint[..16],
             last_cert.tbs_certificate.subject
         );
-        
+
         if self.trusted_root_hashes.contains(&last_cert_hash) {
-            tracing::info!("Last certificate is a trusted root");
             return Ok(());
         }
 
@@ -363,14 +362,14 @@ impl Rfc6962Validator {
         for (idx, cert) in chain.iter().enumerate() {
             let cert_subject = &cert.tbs_certificate.subject;
             let cert_issuer = &cert.tbs_certificate.issuer;
-            
+
             tracing::debug!(
                 "Checking cert[{}] - subject: {}, issuer: {}",
                 idx,
                 cert_subject,
                 cert_issuer
             );
-            
+
             let mut matched_issuers = 0;
             for root in &self.trusted_roots {
                 if cert.tbs_certificate.issuer == root.tbs_certificate.subject {
@@ -379,7 +378,7 @@ impl Rfc6962Validator {
                         "Found potential issuer match - root subject: {}",
                         root.tbs_certificate.subject
                     );
-                    
+
                     // Verify the certificate is actually signed by this root
                     let cert_der = cert.to_der().map_err(|e| {
                         CtError::Internal(format!("Failed to encode certificate: {}", e))
@@ -425,7 +424,7 @@ impl Rfc6962Validator {
                     }
                 }
             }
-            
+
             if matched_issuers == 0 {
                 tracing::debug!(
                     "No trusted roots matched the issuer '{}' for cert[{}]",
