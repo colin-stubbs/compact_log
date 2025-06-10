@@ -1,7 +1,5 @@
+use crate::merkle_tree::{ConsistencyProof, InclusionProof, RootHash, SlateDbBackedTree};
 use crate::types::{CtError, Result};
-use crate::merkle_tree::{
-    SlateDbBackedTree, ConsistencyProof, InclusionProof, RootHash,
-};
 use sha2::Sha256;
 use slatedb::Db;
 use std::sync::Arc;
@@ -13,7 +11,7 @@ pub struct Certificate {
 
 impl AsRef<[u8]> for Certificate {
     fn as_ref(&self) -> &[u8] {
-        &self.data // This returns the MerkleTreeLeaf bytes that ct-merkle will hash
+        &self.data
     }
 }
 
@@ -204,15 +202,12 @@ impl StorageBackedMerkleTree {
 
     /// Check if multiple keys exist in the underlying database
     pub async fn check_keys_exist(&self, keys: &[Vec<u8>]) -> Result<Vec<bool>> {
-        self.tree
-            .check_keys_exist(keys)
-            .await
-            .map_err(|e| {
-                CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
-                    "Failed to check keys: {:?}",
-                    e
-                )))
-            })
+        self.tree.check_keys_exist(keys).await.map_err(|e| {
+            CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
+                "Failed to check keys: {:?}",
+                e
+            )))
+        })
     }
 }
 
