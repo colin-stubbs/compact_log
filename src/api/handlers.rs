@@ -76,7 +76,6 @@ pub async fn add_chain(
         })?;
     }
 
-    // Calculate certificate hash for deduplication
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(&cert_der);
@@ -276,7 +275,7 @@ pub async fn add_pre_chain(
         )
     })?;
 
-    let tbs_certificate = LogEntry::remove_poison_extension(&precert_der).map_err(|e| {
+    let tbs_certificate = LogEntry::remove_poison_extension_and_transform(&precert_der, &complete_chain).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -285,7 +284,6 @@ pub async fn add_pre_chain(
         )
     })?;
 
-    // Calculate certificate hash for deduplication (using TBS certificate for pre-certs)
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(&tbs_certificate);

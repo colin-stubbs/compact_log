@@ -108,13 +108,32 @@ pub struct DeduplicatedLogEntry {
 const POISON_EXTENSION_OID: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.4.3");
 
+const CT_EKU_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.4.4");
+const AUTHORITY_KEY_IDENTIFIER_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.35");
+
 impl DeduplicatedLogEntry {
     /// Create a new deduplicated log entry from a regular log entry
     pub fn from_log_entry(entry: &LogEntry) -> Self {
-        // Hash the certificate
-        let mut hasher = Sha256::new();
-        hasher.update(&entry.certificate);
-        let certificate_hash = hasher.finalize().into();
+        let (certificate_hash, original_precert_hash) =
+            if entry.entry_type == LogEntryType::PrecertEntry {
+                let precert_hash = entry
+                    .original_precert
+                    .as_ref()
+                    .map(|precert| {
+                        let mut hasher = Sha256::new();
+                        hasher.update(precert);
+                        hasher.finalize().into()
+                    })
+                    .expect("Precert entry must have original_precert");
+
+                (precert_hash, Some(precert_hash))
+            } else {
+                let mut hasher = Sha256::new();
+                hasher.update(&entry.certificate);
+                let cert_hash = hasher.finalize().into();
+
+                (cert_hash, None)
+            };
 
         // Hash the chain certificates if present
         let chain_hashes = entry.chain.as_ref().map(|chain| {
@@ -126,13 +145,6 @@ impl DeduplicatedLogEntry {
                     hasher.finalize().into()
                 })
                 .collect()
-        });
-
-        // Hash the original precert if present
-        let original_precert_hash = entry.original_precert.as_ref().map(|precert| {
-            let mut hasher = Sha256::new();
-            hasher.update(precert);
-            hasher.finalize().into()
         });
 
         // Convert issuer_key_hash from Vec<u8> to [u8; 32] if present
@@ -324,23 +336,149 @@ impl LogEntry {
         Ok(hasher.finalize().to_vec())
     }
 
-    /// Remove the poison extension from a pre-certificate to get the TBSCertificate
-    pub fn remove_poison_extension(certificate_der: &[u8]) -> Result<Vec<u8>> {
-        let mut cert = Certificate::from_der(certificate_der).map_err(|e| {
+    /// Check if a certificate is a Precertificate Signing Certificate
+    /// According to RFC 6962, this must have CA:true and EKU for Certificate Transparency
+    pub fn is_precert_signing_cert(certificate_der: &[u8]) -> Result<bool> {
+        use x509_cert::ext::pkix::{BasicConstraints, ExtendedKeyUsage};
+
+        let cert = Certificate::from_der(certificate_der).map_err(|e| {
             CtError::InvalidCertificate(format!("Failed to parse certificate: {}", e))
         })?;
 
-        if let Some(ref mut extensions) = cert.tbs_certificate.extensions {
-            extensions.retain(|ext| ext.extn_id != POISON_EXTENSION_OID);
+        let basic_constraints_oid = ObjectIdentifier::new_unwrap("2.5.29.19");
+        let extended_key_usage_oid = ObjectIdentifier::new_unwrap("2.5.29.37");
 
-            // If no extensions remain, set extensions to None
-            if extensions.is_empty() {
-                cert.tbs_certificate.extensions = None;
+        let mut has_ca_true = false;
+        let mut has_ct_eku = false;
+
+        if let Some(extensions) = &cert.tbs_certificate.extensions {
+            for ext in extensions.iter() {
+                if ext.extn_id == basic_constraints_oid {
+                    match BasicConstraints::from_der(ext.extn_value.as_bytes()) {
+                        Ok(bc) => has_ca_true = bc.ca,
+                        Err(_) => continue,
+                    }
+                } else if ext.extn_id == extended_key_usage_oid {
+                    match ExtendedKeyUsage::from_der(ext.extn_value.as_bytes()) {
+                        Ok(eku) => {
+                            for oid in eku.0.iter() {
+                                if *oid == CT_EKU_OID {
+                                    has_ct_eku = true;
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
             }
         }
 
+        Ok(has_ca_true && has_ct_eku)
+    }
+
+    /// Remove the poison extension from a pre-certificate to get the TBSCertificate
+    /// If the pre-certificate was signed by a Precertificate Signing Certificate,
+    /// also update the issuer and Authority Key Identifier
+    pub fn remove_poison_extension_and_transform(
+        precert_der: &[u8],
+        chain: &[Vec<u8>],
+    ) -> Result<Vec<u8>> {
+        use der::asn1::OctetString;
+        use x509_cert::ext::pkix::{AuthorityKeyIdentifier, SubjectKeyIdentifier};
+
+        let mut precert = Certificate::from_der(precert_der).map_err(|e| {
+            CtError::InvalidCertificate(format!("Failed to parse pre-certificate: {}", e))
+        })?;
+
+        // Check if the immediate issuer is a Precertificate Signing Certificate
+        let mut update_issuer = false;
+        let mut final_issuer = None;
+        let mut final_issuer_key_id = None;
+
+        if !chain.is_empty() {
+            // The immediate issuer is at index 0 (first cert after the pre-cert)
+            let immediate_issuer_der = &chain[0];
+
+            if Self::is_precert_signing_cert(immediate_issuer_der)? {
+                update_issuer = true;
+
+                // The final issuer should be at index 1
+                if chain.len() >= 2 {
+                    let final_issuer_cert = Certificate::from_der(&chain[1]).map_err(|e| {
+                        CtError::InvalidCertificate(format!(
+                            "Failed to parse final issuer certificate: {}",
+                            e
+                        ))
+                    })?;
+
+                    final_issuer = Some(final_issuer_cert.tbs_certificate.subject.clone());
+
+                    // Extract the Subject Key Identifier from the final issuer
+                    if let Some(extensions) = &final_issuer_cert.tbs_certificate.extensions {
+                        let subject_key_id_oid = ObjectIdentifier::new_unwrap("2.5.29.14");
+                        for ext in extensions.iter() {
+                            if ext.extn_id == subject_key_id_oid {
+                                match SubjectKeyIdentifier::from_der(ext.extn_value.as_bytes()) {
+                                    Ok(ski) => {
+                                        final_issuer_key_id = Some(ski.0.as_bytes().to_vec());
+                                        break;
+                                    }
+                                    Err(_) => continue,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Remove the poison extension and potentially update AKID
+        if let Some(ref mut extensions) = precert.tbs_certificate.extensions {
+            extensions.retain(|ext| ext.extn_id != POISON_EXTENSION_OID);
+
+            // Update Authority Key Identifier if needed
+            if update_issuer && final_issuer_key_id.is_some() {
+                for ext in extensions.iter_mut() {
+                    if ext.extn_id == AUTHORITY_KEY_IDENTIFIER_OID {
+                        // Create new AuthorityKeyIdentifier with the final issuer's key ID
+                        let new_akid = AuthorityKeyIdentifier {
+                            key_identifier: Some(
+                                OctetString::new(final_issuer_key_id.as_ref().unwrap().clone())
+                                    .unwrap(),
+                            ),
+                            authority_cert_issuer: None,
+                            authority_cert_serial_number: None,
+                        };
+
+                        match new_akid.to_der() {
+                            Ok(akid_der) => {
+                                ext.extn_value = OctetString::new(akid_der).unwrap();
+                            }
+                            Err(e) => {
+                                return Err(CtError::InvalidCertificate(format!(
+                                    "Failed to encode new Authority Key Identifier: {}",
+                                    e
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If no extensions remain, set extensions to None
+            if extensions.is_empty() {
+                precert.tbs_certificate.extensions = None;
+            }
+        }
+
+        // Update the issuer if needed
+        if update_issuer && final_issuer.is_some() {
+            precert.tbs_certificate.issuer = final_issuer.unwrap();
+        }
+
         // Return the TBSCertificate (without the signature)
-        cert.tbs_certificate.to_der().map_err(|e| {
+        precert.tbs_certificate.to_der().map_err(|e| {
             CtError::InvalidCertificate(format!("Failed to encode TBSCertificate: {}", e))
         })
     }
@@ -447,24 +585,24 @@ mod tests {
     use x509_cert::serial_number::SerialNumber;
     use x509_cert::{Certificate, TbsCertificate, Version};
 
-    fn create_test_timestamp() -> DateTime<Utc> {
+    pub fn create_test_timestamp() -> DateTime<Utc> {
         Utc.timestamp_millis_opt(1234567890000).unwrap()
     }
 
-    fn create_test_public_key() -> Vec<u8> {
+    pub fn create_test_public_key() -> Vec<u8> {
         use p256::ecdsa::SigningKey;
         use x509_cert::spki::EncodePublicKey;
-        
+
         // Generate a deterministic test key using a fixed seed
         let seed = [42u8; 32];
         let signing_key = SigningKey::from_bytes(&seed.into()).unwrap();
         let verifying_key = signing_key.verifying_key();
-        
+
         // Export as SubjectPublicKeyInfo DER
         verifying_key.to_public_key_der().unwrap().to_vec()
     }
 
-    fn create_test_certificate() -> Vec<u8> {
+    pub fn create_test_certificate() -> Vec<u8> {
         use der::asn1::BitString;
         use x509_cert::attr::{AttributeTypeAndValue, AttributeValue};
         use x509_cert::name::{RdnSequence, RelativeDistinguishedName};
@@ -525,7 +663,7 @@ mod tests {
         cert.to_der().unwrap()
     }
 
-    fn create_precertificate_with_poison() -> Vec<u8> {
+    pub fn create_precertificate_with_poison() -> Vec<u8> {
         use der::asn1::{BitString, OctetString};
         use x509_cert::attr::{AttributeTypeAndValue, AttributeValue};
         use x509_cert::name::{RdnSequence, RelativeDistinguishedName};
@@ -804,5 +942,94 @@ mod tests {
         let deserialized: GetProofByHashRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(proof_req.hash, deserialized.hash);
         assert_eq!(proof_req.tree_size, deserialized.tree_size);
+    }
+
+    #[test]
+    fn test_is_precert_signing_cert() {
+        // Test with a normal certificate (should return false)
+        let normal_cert = create_test_certificate();
+        assert_eq!(
+            LogEntry::is_precert_signing_cert(&normal_cert).unwrap(),
+            false
+        );
+
+        // Test with invalid certificate
+        let invalid_cert = vec![0x00, 0x01, 0x02];
+        assert!(LogEntry::is_precert_signing_cert(&invalid_cert).is_err());
+    }
+
+    #[test]
+    fn test_remove_poison_extension_and_transform() {
+        // Test with pre-certificate and empty chain (legacy behavior)
+        let precert = create_precertificate_with_poison();
+        let tbs_cert = LogEntry::remove_poison_extension_and_transform(&precert, &vec![]).unwrap();
+
+        // Verify the poison extension was removed
+        let tbs = x509_cert::TbsCertificate::from_der(&tbs_cert).unwrap();
+        if let Some(extensions) = &tbs.extensions {
+            for ext in extensions.iter() {
+                assert_ne!(ext.extn_id, POISON_EXTENSION_OID);
+            }
+        }
+    }
+
+    #[test]
+    fn test_remove_poison_extension_with_regular_issuer() {
+        // Test with pre-certificate signed by regular CA (not a Precertificate Signing Certificate)
+        let precert = create_precertificate_with_poison();
+        let issuer_cert = create_test_certificate();
+        let chain = vec![issuer_cert];
+
+        let original_precert = Certificate::from_der(&precert).unwrap();
+        let original_issuer = original_precert.tbs_certificate.issuer.clone();
+
+        let tbs_cert = LogEntry::remove_poison_extension_and_transform(&precert, &chain).unwrap();
+        let tbs = x509_cert::TbsCertificate::from_der(&tbs_cert).unwrap();
+
+        // Verify the poison extension was removed
+        if let Some(extensions) = &tbs.extensions {
+            for ext in extensions.iter() {
+                assert_ne!(ext.extn_id, POISON_EXTENSION_OID);
+            }
+        }
+
+        // Verify issuer was NOT changed (since it's not a Precertificate Signing Certificate)
+        assert_eq!(tbs.issuer, original_issuer);
+    }
+
+    #[test]
+    fn test_extract_issuer_key_hash() {
+        let cert1 = create_test_certificate();
+        let cert2 = create_test_certificate();
+        let chain = vec![cert1, cert2.clone()];
+
+        let key_hash = LogEntry::extract_issuer_key_hash(&chain).unwrap();
+        assert_eq!(key_hash.len(), 32); // SHA-256 hash
+
+        // Verify it's the hash of the issuer's (cert2) SubjectPublicKeyInfo
+        let issuer_cert = Certificate::from_der(&cert2).unwrap();
+        let spki_der = issuer_cert
+            .tbs_certificate
+            .subject_public_key_info
+            .to_der()
+            .unwrap();
+
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&spki_der);
+        let expected_hash = hasher.finalize().to_vec();
+
+        assert_eq!(key_hash, expected_hash);
+    }
+
+    #[test]
+    fn test_extract_issuer_key_hash_insufficient_chain() {
+        let chain = vec![create_test_certificate()]; // Only one certificate
+        let result = LogEntry::extract_issuer_key_hash(&chain);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("at least issuer certificate"));
     }
 }

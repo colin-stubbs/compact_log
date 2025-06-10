@@ -349,10 +349,11 @@ impl CtStorage {
             let mut cert_data_map = std::collections::HashMap::new();
 
             for (_orig_idx, _entry_data, _cert_hash, _sct, log_entry) in entry_metadata.iter() {
-                // Main certificate
-                let cert_hash = DeduplicatedLogEntry::hash_certificate(&log_entry.certificate);
-                if cert_hashes_to_check.insert(cert_hash) {
-                    cert_data_map.insert(cert_hash, log_entry.certificate.clone());
+                if log_entry.entry_type != crate::types::LogEntryType::PrecertEntry {
+                    let cert_hash = DeduplicatedLogEntry::hash_certificate(&log_entry.certificate);
+                    if cert_hashes_to_check.insert(cert_hash) {
+                        cert_data_map.insert(cert_hash, log_entry.certificate.clone());
+                    }
                 }
 
                 // Chain certificates
@@ -365,7 +366,6 @@ impl CtStorage {
                     }
                 }
 
-                // Original precert
                 if let Some(precert) = &log_entry.original_precert {
                     let precert_hash = DeduplicatedLogEntry::hash_certificate(precert);
                     if cert_hashes_to_check.insert(precert_hash) {
@@ -656,10 +656,74 @@ impl CtStorage {
         &self,
         dedup_entry: &DeduplicatedLogEntry,
     ) -> Result<LogEntry> {
-        let storage_clone = self.clone();
-        let cert_hash = dedup_entry.certificate_hash.clone();
-        let main_cert_handle =
-            tokio::spawn(async move { storage_clone.get_certificate(&cert_hash).await });
+        use crate::types::LogEntry as LogEntryType;
+        let (certificate, original_precert) = if dedup_entry.entry_type
+            == crate::types::LogEntryType::PrecertEntry
+        {
+            let storage_clone = self.clone();
+            let cert_hash = dedup_entry.certificate_hash.clone();
+            let precert_result =
+                tokio::spawn(async move { storage_clone.get_certificate(&cert_hash).await })
+                    .await
+                    .map_err(|e| StorageError::InvalidFormat(format!("Task join error: {}", e)))??
+                    .ok_or_else(|| {
+                        StorageError::InvalidFormat("Original precert not found".to_string())
+                    })?;
+
+            let chain_handles = dedup_entry.chain_hashes.as_ref().map(|hashes| {
+                hashes
+                    .iter()
+                    .map(|hash| {
+                        let storage_clone = self.clone();
+                        let hash_clone = hash.clone();
+                        tokio::spawn(
+                            async move { storage_clone.get_certificate(&hash_clone).await },
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+            let chain = match chain_handles {
+                Some(handles) => {
+                    let results = join_all(handles).await;
+                    let mut chain_certs = Vec::new();
+                    for result in results {
+                        let cert = result
+                            .map_err(|e| {
+                                StorageError::InvalidFormat(format!("Task join error: {}", e))
+                            })??
+                            .ok_or_else(|| {
+                                StorageError::InvalidFormat(
+                                    "Chain certificate not found".to_string(),
+                                )
+                            })?;
+                        chain_certs.push(cert);
+                    }
+                    chain_certs
+                }
+                None => Vec::new(),
+            };
+
+            let tbs_certificate =
+                LogEntryType::remove_poison_extension_and_transform(&precert_result, &chain)
+                    .map_err(|e| {
+                        StorageError::InvalidFormat(format!("Failed to transform precert: {}", e))
+                    })?;
+
+            (tbs_certificate, Some(precert_result))
+        } else {
+            let storage_clone = self.clone();
+            let cert_hash = dedup_entry.certificate_hash.clone();
+            let main_cert_handle =
+                tokio::spawn(async move { storage_clone.get_certificate(&cert_hash).await });
+
+            let certificate = main_cert_handle
+                .await
+                .map_err(|e| StorageError::InvalidFormat(format!("Task join error: {}", e)))??
+                .ok_or_else(|| StorageError::InvalidFormat("Certificate not found".to_string()))?;
+
+            (certificate, None)
+        };
 
         let chain_handles = dedup_entry.chain_hashes.as_ref().map(|hashes| {
             hashes
@@ -672,71 +736,22 @@ impl CtStorage {
                 .collect::<Vec<_>>()
         });
 
-        let precert_handle = dedup_entry.original_precert_hash.as_ref().map(|hash| {
-            let storage_clone = self.clone();
-            let hash_clone = hash.clone();
-            tokio::spawn(async move { storage_clone.get_certificate(&hash_clone).await })
-        });
-
-        let (main_cert_result, chain_results, precert_result) = tokio::join!(
-            async {
-                main_cert_handle
-                    .await
-                    .map_err(|e| StorageError::InvalidFormat(format!("Task join error: {}", e)))
-            },
-            async {
-                match chain_handles {
-                    Some(handles) => {
-                        let results = join_all(handles).await;
-                        let mut processed_results = Vec::new();
-                        for result in results {
-                            match result {
-                                Ok(r) => processed_results.push(r),
-                                Err(e) => {
-                                    return Err(StorageError::InvalidFormat(format!(
-                                        "Task join error: {}",
-                                        e
-                                    )))
-                                }
-                            }
-                        }
-                        Ok(Some(processed_results))
-                    }
-                    None => Ok(None),
-                }
-            },
-            async {
-                match precert_handle {
-                    Some(handle) => handle
-                        .await
-                        .map_err(|e| StorageError::InvalidFormat(format!("Task join error: {}", e)))
-                        .map(Some),
-                    None => Ok(None),
-                }
-            }
-        );
-
-        let certificate = main_cert_result??
-            .ok_or_else(|| StorageError::InvalidFormat("Certificate not found".to_string()))?;
-
-        let chain = match chain_results? {
-            Some(results) => {
+        let chain = match chain_handles {
+            Some(handles) => {
+                let results = join_all(handles).await;
                 let mut chain_certs = Vec::new();
-                for (_i, result) in results.into_iter().enumerate() {
-                    let cert = result?.ok_or_else(|| {
-                        StorageError::InvalidFormat("Chain certificate not found".to_string())
-                    })?;
+                for result in results {
+                    let cert = result
+                        .map_err(|e| {
+                            StorageError::InvalidFormat(format!("Task join error: {}", e))
+                        })??
+                        .ok_or_else(|| {
+                            StorageError::InvalidFormat("Chain certificate not found".to_string())
+                        })?;
                     chain_certs.push(cert);
                 }
                 Some(chain_certs)
             }
-            None => None,
-        };
-
-        let original_precert = match precert_result? {
-            Some(result) => Some(result?.ok_or_else(|| {
-                StorageError::InvalidFormat("Original precert not found".to_string())
-            })?),
             None => None,
         };
 
@@ -881,6 +896,40 @@ mod tests {
         LogEntry::new_with_timestamp(index, certificate, chain, timestamp)
     }
 
+    fn create_test_precert_entry() -> (LogEntry, [u8; 32]) {
+        let original_precert_der =
+            crate::test_utils::test_utils::create_precertificate_with_poison();
+        let issuer_cert_der = crate::test_utils::test_utils::create_test_certificate();
+        // For precertificates, the chain includes [precert, issuer]
+        let full_chain = vec![original_precert_der.clone(), issuer_cert_der.clone()];
+
+        let issuer_key_hash: Vec<u8> = LogEntry::extract_issuer_key_hash(&full_chain).unwrap();
+
+        let tbs_certificate =
+            LogEntry::remove_poison_extension_and_transform(&original_precert_der, &full_chain)
+                .unwrap();
+
+        let timestamp = Utc.timestamp_millis_opt(1234567890000).unwrap();
+
+        let log_entry = LogEntry::new_precert_with_timestamp(
+            0,
+            tbs_certificate.clone(),
+            Some(vec![issuer_cert_der]),
+            issuer_key_hash.clone(),
+            original_precert_der,
+            timestamp,
+        );
+
+        // Calculate cert hash for deduplication (using TBS certificate for pre-certs)
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&tbs_certificate);
+        hasher.update(&issuer_key_hash);
+        let cert_hash: [u8; 32] = hasher.finalize().into();
+
+        (log_entry, cert_hash)
+    }
+
     fn create_test_sct(log_id: LogId, timestamp: u64) -> SignedCertificateTimestamp {
         SignedCertificateTimestamp {
             version: SctVersion::V1,
@@ -930,6 +979,51 @@ mod tests {
         assert_eq!(retrieved.index, log_entry.index);
         assert_eq!(retrieved.certificate, log_entry.certificate);
         assert_eq!(retrieved.timestamp, log_entry.timestamp);
+    }
+
+    #[tokio::test]
+    async fn test_precert_storage_optimization() {
+        let config = BatchConfig {
+            max_batch_size: 1,
+            max_batch_timeout_ms: 100,
+        };
+        let (storage, _tree) = create_test_storage(config).await;
+
+        let (log_entry, cert_hash) = create_test_precert_entry();
+        let log_id = create_test_log_id();
+        let sct = create_test_sct(log_id, 1234567890000);
+
+        let index = storage
+            .add_entry_batched(log_entry.clone(), cert_hash, sct)
+            .await
+            .unwrap();
+
+        let dedup_entry = storage
+            .get_deduplicated_entry(index)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let original_precert_hash =
+            DeduplicatedLogEntry::hash_certificate(&log_entry.original_precert.as_ref().unwrap());
+        assert_eq!(dedup_entry.certificate_hash, original_precert_hash);
+        assert_eq!(
+            dedup_entry.original_precert_hash,
+            Some(original_precert_hash)
+        );
+
+        // Retrieve full entry and verify TBS is reconstructed correctly
+        let retrieved = storage.get_entry(index).await.unwrap().unwrap();
+        assert_eq!(
+            retrieved.entry_type,
+            crate::types::LogEntryType::PrecertEntry
+        );
+        assert_eq!(retrieved.original_precert, log_entry.original_precert);
+
+        // The certificate field should contain the reconstructed TBS
+        // It should match what we originally computed
+        assert_eq!(retrieved.certificate, log_entry.certificate);
+        assert_eq!(retrieved.issuer_key_hash, log_entry.issuer_key_hash);
     }
 
     #[tokio::test]
@@ -1117,37 +1211,22 @@ mod tests {
         };
         let (storage, _tree) = create_test_storage(config).await;
 
-        let timestamp = Utc.timestamp_millis_opt(1234567890000).unwrap();
-        let certificate = vec![0x01, 0x02, 0x03, 0x04];
-        let chain = Some(vec![vec![0x05, 0x06], vec![0x07, 0x08]]);
-        let issuer_key_hash = vec![0xaa; 32];
-        let original_precert = vec![0x09, 0x0a, 0x0b];
-
-        let log_entry = LogEntry::new_precert_with_timestamp(
-            0,
-            certificate.clone(),
-            chain.clone(),
-            issuer_key_hash.clone(),
-            original_precert.clone(),
-            timestamp,
-        );
-
-        let cert_hash = DeduplicatedLogEntry::hash_certificate(&certificate);
+        let (log_entry, cert_hash) = create_test_precert_entry();
         let log_id = create_test_log_id();
-        let sct = create_test_sct(log_id, timestamp.timestamp_millis() as u64);
+        let sct = create_test_sct(log_id, log_entry.timestamp.timestamp_millis() as u64);
 
-        // Add entry
         let index = storage
-            .add_entry_batched(log_entry, cert_hash, sct)
+            .add_entry_batched(log_entry.clone(), cert_hash, sct)
             .await
             .unwrap();
 
-        // Retrieve and verify
         let retrieved = storage.get_entry(index).await.unwrap().unwrap();
         assert_eq!(retrieved.entry_type, LogEntryType::PrecertEntry);
-        assert_eq!(retrieved.issuer_key_hash, Some(issuer_key_hash));
-        assert_eq!(retrieved.original_precert, Some(original_precert));
-        assert_eq!(retrieved.chain, chain);
+        assert_eq!(retrieved.issuer_key_hash, log_entry.issuer_key_hash);
+        assert_eq!(retrieved.original_precert, log_entry.original_precert);
+        assert_eq!(retrieved.chain, log_entry.chain);
+        // Verify the certificate (TBS) is properly reconstructed
+        assert_eq!(retrieved.certificate, log_entry.certificate);
     }
 
     #[tokio::test]
@@ -1456,36 +1535,55 @@ mod tests {
         let (storage, _tree) = create_test_storage(config).await;
 
         let log_id = create_test_log_id();
-        let certificate = vec![0x01, 0x02, 0x03, 0x04];
-        let chain_cert1 = vec![0x05, 0x06];
-        let chain_cert2 = vec![0x07, 0x08];
-        let original_precert = vec![0x09, 0x0a];
 
-        // Create two precert entries that share chain certificates
+        let issuer_cert = crate::test_utils::test_utils::create_test_certificate();
+
+        let precert1 = crate::test_utils::test_utils::create_precertificate_with_poison();
+        let precert2 = crate::test_utils::test_utils::create_test_certificate_with_serial(3); // Different cert
+
+        // For the test, we'll treat both as precerts even though precert2 doesn't have poison
+        // This is just for testing deduplication logic
+
+        let full_chain = vec![precert1.clone(), issuer_cert.clone()];
+        let issuer_key_hash1 = LogEntry::extract_issuer_key_hash(&full_chain).unwrap();
+        let tbs1 = LogEntry::remove_poison_extension_and_transform(&precert1, &full_chain).unwrap();
+
+        let full_chain2 = vec![precert2.clone(), issuer_cert.clone()];
+        let issuer_key_hash2 = LogEntry::extract_issuer_key_hash(&full_chain2).unwrap();
+        let tbs2 = vec![0x20, 0x21, 0x22]; // Mock TBS for second entry
+
         let timestamp1 = Utc.timestamp_millis_opt(1234567890000).unwrap();
         let entry1 = LogEntry::new_precert_with_timestamp(
             0,
-            certificate.clone(),
-            Some(vec![chain_cert1.clone(), chain_cert2.clone()]),
-            vec![0xaa; 32],
-            original_precert.clone(),
+            tbs1.clone(),
+            Some(vec![issuer_cert.clone()]),
+            issuer_key_hash1.clone(),
+            precert1.clone(),
             timestamp1,
         );
 
         let timestamp2 = Utc.timestamp_millis_opt(1234567891000).unwrap();
-        let different_cert = vec![0x11, 0x12, 0x13, 0x14];
         let entry2 = LogEntry::new_precert_with_timestamp(
             1,
-            different_cert.clone(),
-            Some(vec![chain_cert1.clone(), chain_cert2.clone()]), // Same chain
-            vec![0xbb; 32],
-            original_precert.clone(), // Same precert
+            tbs2.clone(),
+            Some(vec![issuer_cert.clone()]), // Same issuer
+            issuer_key_hash2.clone(),
+            precert2.clone(),
             timestamp2,
         );
 
-        // Add both entries
-        let cert_hash1 = DeduplicatedLogEntry::hash_certificate(&certificate);
-        let cert_hash2 = DeduplicatedLogEntry::hash_certificate(&different_cert);
+        // Calculate cert hashes for deduplication
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&tbs1);
+        hasher.update(&issuer_key_hash1);
+        let cert_hash1: [u8; 32] = hasher.finalize().into();
+
+        let mut hasher = Sha256::new();
+        hasher.update(&tbs2);
+        hasher.update(&issuer_key_hash2);
+        let cert_hash2: [u8; 32] = hasher.finalize().into();
+
         let sct1 = create_test_sct(log_id.clone(), timestamp1.timestamp_millis() as u64);
         let sct2 = create_test_sct(log_id.clone(), timestamp2.timestamp_millis() as u64);
 
@@ -1498,24 +1596,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Check that chain certificates and precert are deduplicated
-        let chain_hash1 = DeduplicatedLogEntry::hash_certificate(&chain_cert1);
-        let chain_hash2 = DeduplicatedLogEntry::hash_certificate(&chain_cert2);
-        let precert_hash = DeduplicatedLogEntry::hash_certificate(&original_precert);
-
-        // Each should be stored only once
+        // Check that the shared issuer certificate is deduplicated
+        let issuer_hash = DeduplicatedLogEntry::hash_certificate(&issuer_cert);
         assert!(storage
-            .get_certificate(&chain_hash1)
-            .await
-            .unwrap()
-            .is_some());
-        assert!(storage
-            .get_certificate(&chain_hash2)
-            .await
-            .unwrap()
-            .is_some());
-        assert!(storage
-            .get_certificate(&precert_hash)
+            .get_certificate(&issuer_hash)
             .await
             .unwrap()
             .is_some());
@@ -1524,9 +1608,9 @@ mod tests {
         let retrieved1 = storage.get_entry(index1).await.unwrap().unwrap();
         let retrieved2 = storage.get_entry(index2).await.unwrap().unwrap();
 
-        assert_eq!(retrieved1.chain.as_ref().unwrap().len(), 2);
-        assert_eq!(retrieved2.chain.as_ref().unwrap().len(), 2);
-        assert_eq!(retrieved1.original_precert, Some(original_precert.clone()));
-        assert_eq!(retrieved2.original_precert, Some(original_precert));
+        assert_eq!(retrieved1.chain.as_ref().unwrap().len(), 1);
+        assert_eq!(retrieved2.chain.as_ref().unwrap().len(), 1);
+        assert_eq!(retrieved1.original_precert, Some(precert1));
+        assert_eq!(retrieved2.original_precert, Some(precert2));
     }
 }

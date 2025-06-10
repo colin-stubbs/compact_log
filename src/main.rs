@@ -32,6 +32,9 @@ mod storage;
 mod types;
 mod validation;
 
+#[cfg(test)]
+mod test_utils;
+
 use api::{create_router, ApiState};
 use storage::{BatchConfig, CtStorage};
 use types::LogId;
