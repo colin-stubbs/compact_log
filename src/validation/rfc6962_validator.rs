@@ -405,7 +405,7 @@ impl Rfc6962Validator {
                         Ok(true) => {
                             let root_hash = Self::certificate_hash(root)?;
                             let root_fingerprint = hex::encode(&root_hash);
-                            tracing::info!(
+                            tracing::debug!(
                                 "Certificate at index {} verified by root {} ({})",
                                 idx,
                                 &root_fingerprint[..16],
