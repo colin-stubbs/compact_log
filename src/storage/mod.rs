@@ -287,7 +287,7 @@ impl CtStorage {
         tracing::trace!("flush_batch: Flushing {} entries", batch_size);
 
         let mut leaf_data_vec = Vec::new();
-        let mut entry_metadata = Vec::new();
+        let mut entry_metadata: Vec<(usize, Vec<u8>, [u8; 32], SignedCertificateTimestamp, LogEntry)> = Vec::new();
         let mut failed_entries = Vec::new();
 
         // Deduplication tracking variables
@@ -303,7 +303,7 @@ impl CtStorage {
         for (i, entry) in entries.iter().enumerate() {
             let dedup_entry = DeduplicatedLogEntry::from_log_entry(&entry.log_entry);
 
-            match bincode::serde::encode_to_vec(&dedup_entry, bincode::config::standard()) {
+            match postcard::to_stdvec(&dedup_entry) {
                 Ok(entry_data) => {
                     entry_metadata.push((
                         i,
@@ -456,7 +456,7 @@ impl CtStorage {
                     timestamp: sct.timestamp,
                 };
                 let sct_data =
-                    match bincode::serde::encode_to_vec(&sct_entry, bincode::config::standard()) {
+                    match postcard::to_stdvec(&sct_entry) {
                         Ok(data) => data,
                         Err(e) => {
                             tracing::error!("Failed to serialize SCT entry: {}", e);
@@ -605,8 +605,7 @@ impl CtStorage {
         match self.get(&key).await? {
             Some(bytes) => {
                 let entry: CertificateSctEntry =
-                    bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-                        .map(|(entry, _)| entry)
+                    postcard::from_bytes(&bytes)
                         .map_err(|e| {
                             StorageError::InvalidFormat(format!(
                                 "Failed to deserialize SCT entry: {}",
@@ -638,8 +637,7 @@ impl CtStorage {
         match self.get(&key).await? {
             Some(bytes) => {
                 let entry: DeduplicatedLogEntry =
-                    bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-                        .map(|(entry, _)| entry)
+                    postcard::from_bytes(&bytes)
                         .map_err(|e| {
                             StorageError::InvalidFormat(format!(
                                 "Failed to deserialize deduplicated entry: {}",

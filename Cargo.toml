@@ -16,7 +16,7 @@ slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "c80bcddbbbd066b
     "azure",
 ] }
 num_cpus = "1.17.0"
-bincode = { version = "2.0", features = ["std", "serde"] }
+postcard = { version = "1.0", features = ["alloc", "use-std"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }

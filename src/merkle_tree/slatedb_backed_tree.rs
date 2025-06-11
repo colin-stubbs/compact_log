@@ -249,7 +249,7 @@ where
         let mut computed_hashes = std::collections::BTreeMap::<u64, digest::Output<H>>::new();
 
         for item in items.iter() {
-            let leaf_bytes = bincode::serde::encode_to_vec(item, bincode::config::standard())
+            let leaf_bytes = postcard::to_stdvec(item)
                 .map_err(|e| SlateDbTreeError::EncodingError(e.to_string()))?;
             batch.put(&Self::leaf_key(current_num_leaves), &leaf_bytes);
 
@@ -611,7 +611,7 @@ where
 
         let mut batch = WriteBatch::new();
 
-        let leaf_bytes = bincode::serde::encode_to_vec(&new_val, bincode::config::standard())
+        let leaf_bytes = postcard::to_stdvec(&new_val)
             .map_err(|e| SlateDbTreeError::EncodingError(e.to_string()))?;
         batch.put(&Self::leaf_key(num_leaves), &leaf_bytes);
 
@@ -707,9 +707,8 @@ where
     pub async fn get(&self, idx: u64) -> Result<Option<T>, SlateDbTreeError> {
         match self.db.get(&Self::leaf_key(idx)).await? {
             Some(bytes) => {
-                let (leaf, _) =
-                    bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-                        .map_err(|e| SlateDbTreeError::EncodingError(e.to_string()))?;
+                let leaf = postcard::from_bytes(&bytes)
+                    .map_err(|e| SlateDbTreeError::EncodingError(e.to_string()))?;
                 Ok(Some(leaf))
             }
             None => Ok(None),
