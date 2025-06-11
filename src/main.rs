@@ -414,7 +414,7 @@ async fn initialize_storage(
     let compactor_options: CompactorOptions = CompactorOptions {
         max_sst_size: 64 * 1024 * 1024, // 64 MB
         poll_interval: Duration::from_millis(100),
-        max_concurrent_compactions: 16,
+        max_concurrent_compactions: num_cpus::get(),
         sst_iterator_options: SstIteratorOptions {
             max_fetch_tasks: 16,
             blocks_to_fetch: 2048,
