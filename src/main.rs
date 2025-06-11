@@ -398,7 +398,6 @@ async fn initialize_storage(
     let block_cache = Arc::new(MokaCache::new_with_opts(cache_options));
 
     let garbage_collector_directory_options = GarbageCollectorDirectoryOptions {
-        min_age: Duration::from_secs(60 * 60 * 12), // 12 hours
         ..default::Default::default()
     };
 
