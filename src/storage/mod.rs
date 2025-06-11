@@ -287,7 +287,13 @@ impl CtStorage {
         tracing::trace!("flush_batch: Flushing {} entries", batch_size);
 
         let mut leaf_data_vec = Vec::new();
-        let mut entry_metadata: Vec<(usize, Vec<u8>, [u8; 32], SignedCertificateTimestamp, LogEntry)> = Vec::new();
+        let mut entry_metadata: Vec<(
+            usize,
+            Vec<u8>,
+            [u8; 32],
+            SignedCertificateTimestamp,
+            LogEntry,
+        )> = Vec::new();
         let mut failed_entries = Vec::new();
 
         // Deduplication tracking variables
@@ -455,14 +461,13 @@ impl CtStorage {
                     sct: sct.clone(),
                     timestamp: sct.timestamp,
                 };
-                let sct_data =
-                    match postcard::to_stdvec(&sct_entry) {
-                        Ok(data) => data,
-                        Err(e) => {
-                            tracing::error!("Failed to serialize SCT entry: {}", e);
-                            continue;
-                        }
-                    };
+                let sct_data = match postcard::to_stdvec(&sct_entry) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        tracing::error!("Failed to serialize SCT entry: {}", e);
+                        continue;
+                    }
+                };
 
                 // Store deduplicated entry
                 additional_data.push((entry_key, entry_data.clone()));
@@ -604,14 +609,9 @@ impl CtStorage {
         key.extend_from_slice(cert_hash);
         match self.get(&key).await? {
             Some(bytes) => {
-                let entry: CertificateSctEntry =
-                    postcard::from_bytes(&bytes)
-                        .map_err(|e| {
-                            StorageError::InvalidFormat(format!(
-                                "Failed to deserialize SCT entry: {}",
-                                e
-                            ))
-                        })?;
+                let entry: CertificateSctEntry = postcard::from_bytes(&bytes).map_err(|e| {
+                    StorageError::InvalidFormat(format!("Failed to deserialize SCT entry: {}", e))
+                })?;
                 Ok(Some(entry))
             }
             None => Ok(None),
@@ -636,14 +636,12 @@ impl CtStorage {
         key.extend_from_slice(&index.to_be_bytes());
         match self.get(&key).await? {
             Some(bytes) => {
-                let entry: DeduplicatedLogEntry =
-                    postcard::from_bytes(&bytes)
-                        .map_err(|e| {
-                            StorageError::InvalidFormat(format!(
-                                "Failed to deserialize deduplicated entry: {}",
-                                e
-                            ))
-                        })?;
+                let entry: DeduplicatedLogEntry = postcard::from_bytes(&bytes).map_err(|e| {
+                    StorageError::InvalidFormat(format!(
+                        "Failed to deserialize deduplicated entry: {}",
+                        e
+                    ))
+                })?;
                 Ok(Some(entry))
             }
             None => Ok(None),
@@ -900,7 +898,8 @@ mod tests {
         // For precertificates, the chain includes [precert, issuer]
         let full_chain = vec![original_precert_der.clone(), issuer_cert_der.clone()];
 
-        let issuer_key_hash: Vec<u8> = crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain);
+        let issuer_key_hash: Vec<u8> =
+            crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain);
 
         let tbs_certificate =
             TbsExtractor::extract_tbs_certificate(&original_precert_der, &full_chain).unwrap();
@@ -1539,12 +1538,14 @@ mod tests {
             crate::test_utils::test_utils::create_precertificate_with_poison_and_serial(3); // Different precert
 
         let full_chain = vec![precert1.clone(), issuer_cert.clone()];
-        let issuer_key_hash1 = crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain);
+        let issuer_key_hash1 =
+            crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain);
         let tbs1 =
             TbsExtractor::extract_tbs_certificate(&precert1, &vec![issuer_cert.clone()]).unwrap();
 
         let full_chain2 = vec![precert2.clone(), issuer_cert.clone()];
-        let issuer_key_hash2 = crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain2);
+        let issuer_key_hash2 =
+            crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain2);
         let tbs2 =
             TbsExtractor::extract_tbs_certificate(&precert2, &vec![issuer_cert.clone()]).unwrap();
 
