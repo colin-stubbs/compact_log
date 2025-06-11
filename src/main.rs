@@ -403,7 +403,7 @@ async fn initialize_storage(
     };
 
     let mut db_options = Settings::default();
-    db_options.compression_codec = Some(CompressionCodec::Lz4);
+    db_options.compression_codec = Some(CompressionCodec::Zstd);
     db_options.garbage_collector_options = Some(GarbageCollectorOptions {
         wal_options: Some(garbage_collector_directory_options),
         manifest_options: Some(garbage_collector_directory_options),
