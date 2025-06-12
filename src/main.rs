@@ -1,5 +1,4 @@
 use config::Config;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::LineEnding;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use p256::SecretKey;
@@ -403,7 +402,7 @@ async fn initialize_storage(
     };
 
     let mut db_options = Settings::default();
-    db_options.compression_codec = Some(CompressionCodec::Zstd);
+    db_options.compression_codec = Some(CompressionCodec::Lz4);
     db_options.garbage_collector_options = Some(GarbageCollectorOptions {
         wal_options: Some(garbage_collector_directory_options),
         manifest_options: Some(garbage_collector_directory_options),
@@ -500,6 +499,7 @@ async fn initialize_storage(
 }
 
 fn derive_public_key_der_from_p256(private_key: &SecretKey) -> Vec<u8> {
+    use p256::pkcs8::EncodePublicKey;
     let public_key = private_key.public_key();
-    public_key.to_encoded_point(false).as_bytes().to_vec()
+    public_key.to_public_key_der().unwrap().to_vec()
 }
