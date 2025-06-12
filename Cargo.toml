@@ -12,7 +12,7 @@ opt-level = 3
 
 [dependencies]
 slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "c80bcddbbbd066b05d3bee9ca797fa4dfc6081f4", features = [
-    "zstd",
+    "lz4",
     "azure",
 ] }
 num_cpus = "1.17.0"
