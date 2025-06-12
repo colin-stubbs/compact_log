@@ -82,6 +82,7 @@ struct AppConfig {
 #[derive(Debug, Deserialize, Serialize)]
 struct ServerConfig {
     bind_addr: String,
+    base_url: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -272,6 +273,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         merkle_tree,
         log_id,
         private_key_bytes,
+        public_key_der,
+        config.server.base_url.clone(),
         validator,
     )?;
 
@@ -306,6 +309,7 @@ async fn initialize_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     let config = AppConfig {
         server: ServerConfig {
             bind_addr: "0.0.0.0:8080".to_string(),
+            base_url: "http://localhost:8080/".to_string(),
         },
         storage: StorageConfig {
             provider: "local".to_string(),
