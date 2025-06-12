@@ -21,6 +21,9 @@ pub struct ApiState {
     pub sct_builder: Arc<SctBuilder>,
     pub sth_builder: Arc<SthBuilder>,
     pub validator: Option<Arc<Rfc6962Validator>>,
+    pub log_id: LogId,
+    pub public_key_der: Vec<u8>,
+    pub base_url: String,
 }
 
 impl ApiState {
@@ -29,6 +32,8 @@ impl ApiState {
         merkle_tree: StorageBackedMerkleTree,
         log_id: LogId,
         private_key: Vec<u8>,
+        public_key_der: Vec<u8>,
+        base_url: String,
         validator: Option<Arc<Rfc6962Validator>>,
     ) -> crate::types::Result<Self> {
         let sct_builder = Arc::new(SctBuilder::from_private_key_bytes(
@@ -43,6 +48,9 @@ impl ApiState {
             sct_builder,
             sth_builder,
             validator,
+            log_id,
+            public_key_der,
+            base_url,
         })
     }
 }
@@ -63,6 +71,8 @@ pub fn create_router(state: ApiState) -> Router {
             "/ct/v1/get-entry-and-proof",
             get(handlers::get_entry_and_proof),
         )
+        // Inclusion request endpoint
+        .route("/inclusion_request.json", get(handlers::inclusion_request))
         // Health check
         .route("/health", get(health_check))
         .with_state(Arc::new(state))

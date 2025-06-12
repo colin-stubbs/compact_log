@@ -400,6 +400,29 @@ pub struct LeafEntry {
     pub extra_data: String,
 }
 
+/// Response for get-roots endpoint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetRootsResponse {
+    pub certificates: Vec<String>,
+}
+
+/// Temporal interval for the inclusion request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemporalInterval {
+    pub start_inclusive: String,
+    pub end_exclusive: String,
+}
+
+/// Inclusion request response for RFC 6962 log
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InclusionRequestResponse {
+    pub key: String,
+    pub log_id: String,
+    pub mmd: u64,
+    pub temporal_interval: TemporalInterval,
+    pub url: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,7 +4,7 @@ use crate::{
     types::{
         AddChainRequest, AddChainResponse, GetConsistencyProofRequest, GetConsistencyProofResponse,
         GetEntriesRequest, GetEntriesResponse, GetProofByHashRequest, GetProofByHashResponse,
-        LeafEntry,
+        GetRootsResponse, InclusionRequestResponse, LeafEntry, TemporalInterval,
     },
     validation::TbsExtractor,
 };
@@ -753,11 +753,6 @@ pub async fn get_entry_and_proof(
     Ok(Json(response))
 }
 
-#[derive(Serialize)]
-pub struct GetRootsResponse {
-    pub certificates: Vec<String>,
-}
-
 #[derive(Deserialize)]
 pub struct GetEntryAndProofRequest {
     pub leaf_index: u64,
@@ -769,4 +764,47 @@ pub struct GetEntryAndProofResponse {
     pub leaf_input: String,
     pub extra_data: String,
     pub audit_path: Vec<String>,
+}
+
+pub async fn inclusion_request(
+    State(state): State<Arc<ApiState>>,
+) -> ApiResult<InclusionRequestResponse> {
+    let public_key_base64 = STANDARD.encode(&state.public_key_der);
+
+    let log_id_base64 = STANDARD.encode(state.log_id.as_bytes());
+
+    let mmd = 0;
+
+    let temporal_interval = if let Some(validator) = &state.validator {
+        let config = validator.get_config();
+        if let Some(window) = &config.temporal_window {
+            TemporalInterval {
+                start_inclusive: window.start.to_rfc3339(),
+                end_exclusive: window.end.to_rfc3339(),
+            }
+        } else {
+            // Default to a very wide temporal window
+            TemporalInterval {
+                start_inclusive: "2000-01-01T00:00:00Z".to_string(),
+                end_exclusive: "2100-01-01T00:00:00Z".to_string(),
+            }
+        }
+    } else {
+        TemporalInterval {
+            start_inclusive: "2000-01-01T00:00:00Z".to_string(),
+            end_exclusive: "2100-01-01T00:00:00Z".to_string(),
+        }
+    };
+
+    let url = state.base_url.clone();
+
+    let response = InclusionRequestResponse {
+        key: public_key_base64,
+        log_id: log_id_base64,
+        mmd,
+        temporal_interval,
+        url,
+    };
+
+    Ok(Json(response))
 }
