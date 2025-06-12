@@ -90,7 +90,7 @@ pub async fn add_chain(
     {
         let response = AddChainResponse {
             sct_version: existing_sct_entry.sct.version as u8,
-            id: existing_sct_entry.sct.log_id.to_hex(),
+            id: STANDARD.encode(existing_sct_entry.sct.log_id.as_bytes()),
             timestamp: existing_sct_entry.sct.timestamp,
             extensions: STANDARD.encode(&existing_sct_entry.sct.extensions),
             signature: STANDARD.encode(&existing_sct_entry.sct.signature),
@@ -173,7 +173,7 @@ pub async fn add_chain(
 
     let response = AddChainResponse {
         sct_version: sct.version as u8,
-        id: sct.log_id.to_hex(),
+        id: STANDARD.encode(sct.log_id.as_bytes()),
         timestamp: sct.timestamp,
         extensions: STANDARD.encode(&sct.extensions),
         signature: STANDARD.encode(&sct.signature),
@@ -311,7 +311,7 @@ pub async fn add_pre_chain(
     {
         let response = AddChainResponse {
             sct_version: existing_sct_entry.sct.version as u8,
-            id: existing_sct_entry.sct.log_id.to_hex(),
+            id: STANDARD.encode(existing_sct_entry.sct.log_id.as_bytes()),
             timestamp: existing_sct_entry.sct.timestamp,
             extensions: STANDARD.encode(&existing_sct_entry.sct.extensions),
             signature: STANDARD.encode(&existing_sct_entry.sct.signature),
@@ -353,7 +353,7 @@ pub async fn add_pre_chain(
 
     let response = AddChainResponse {
         sct_version: sct.version as u8,
-        id: sct.log_id.to_hex(),
+        id: STANDARD.encode(sct.log_id.as_bytes()),
         timestamp: sct.timestamp,
         extensions: STANDARD.encode(&sct.extensions),
         signature: STANDARD.encode(&sct.signature),
