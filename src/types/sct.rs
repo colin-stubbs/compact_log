@@ -48,6 +48,9 @@ impl SignedCertificateTimestamp {
     ) -> Vec<u8> {
         let mut input = Vec::new();
 
+        // Version (1 byte)
+        input.push(self.version as u8);
+
         // SignatureType: certificate_timestamp (0)
         input.push(0);
 
@@ -163,12 +166,12 @@ mod tests {
 
     fn create_test_log_id() -> LogId {
         use x509_cert::spki::EncodePublicKey;
-        
+
         // Generate a deterministic test key using a fixed seed (different from the one in mod.rs)
         let seed = [123u8; 32];
         let signing_key = SigningKey::from_bytes(&seed.into()).unwrap();
         let verifying_key = signing_key.verifying_key();
-        
+
         // Export as SubjectPublicKeyInfo DER and create LogId
         let spki_der = verifying_key.to_public_key_der().unwrap();
         LogId::new(spki_der.as_bytes())
@@ -190,9 +193,9 @@ mod tests {
     fn test_sct_new() {
         let log_id = create_test_log_id();
         let timestamp = 1234567890000u64;
-        
+
         let sct = SignedCertificateTimestamp::new(log_id.clone(), timestamp);
-        
+
         assert_eq!(sct.version, SctVersion::V1);
         assert_eq!(sct.log_id, log_id);
         assert_eq!(sct.timestamp, timestamp);
@@ -205,29 +208,30 @@ mod tests {
         let log_id = create_test_log_id();
         let timestamp = 1234567890000u64;
         let certificate = vec![0x01, 0x02, 0x03, 0x04];
-        
+
         let sct = SignedCertificateTimestamp::new(log_id, timestamp);
         let input = sct.get_signature_input(&certificate, LogEntryType::X509Entry, None);
-        
+
         // Check structure
-        assert_eq!(input[0], 0); // SignatureType: certificate_timestamp
-        
+        assert_eq!(input[0], 0); // Version: v1
+        assert_eq!(input[1], 0); // SignatureType: certificate_timestamp
+
         // Timestamp (8 bytes)
-        let ts_bytes = &input[1..9];
+        let ts_bytes = &input[2..10];
         let ts_value = u64::from_be_bytes(ts_bytes.try_into().unwrap());
         assert_eq!(ts_value, timestamp);
-        
+
         // LogEntryType (2 bytes)
-        assert_eq!(&input[9..11], &[0, 0]); // X509Entry
-        
+        assert_eq!(&input[10..12], &[0, 0]); // X509Entry
+
         // Certificate length (3 bytes)
-        assert_eq!(&input[11..14], &[0, 0, 4]);
-        
+        assert_eq!(&input[12..15], &[0, 0, 4]);
+
         // Certificate data
-        assert_eq!(&input[14..18], &certificate);
-        
+        assert_eq!(&input[15..19], &certificate);
+
         // Extensions length (2 bytes)
-        assert_eq!(&input[18..20], &[0, 0]);
+        assert_eq!(&input[19..21], &[0, 0]);
     }
 
     #[test]
@@ -236,36 +240,37 @@ mod tests {
         let timestamp = 1234567890000u64;
         let certificate = vec![0x01, 0x02, 0x03, 0x04];
         let issuer_key_hash = vec![0xaa; 32];
-        
+
         let sct = SignedCertificateTimestamp::new(log_id, timestamp);
         let input = sct.get_signature_input(
             &certificate,
             LogEntryType::PrecertEntry,
             Some(&issuer_key_hash),
         );
-        
+
         // Check structure
-        assert_eq!(input[0], 0); // SignatureType: certificate_timestamp
-        
+        assert_eq!(input[0], 0); // Version: v1
+        assert_eq!(input[1], 0); // SignatureType: certificate_timestamp
+
         // Timestamp (8 bytes)
-        let ts_bytes = &input[1..9];
+        let ts_bytes = &input[2..10];
         let ts_value = u64::from_be_bytes(ts_bytes.try_into().unwrap());
         assert_eq!(ts_value, timestamp);
-        
+
         // LogEntryType (2 bytes)
-        assert_eq!(&input[9..11], &[0, 1]); // PrecertEntry
-        
+        assert_eq!(&input[10..12], &[0, 1]); // PrecertEntry
+
         // Issuer key hash (32 bytes)
-        assert_eq!(&input[11..43], &issuer_key_hash);
-        
+        assert_eq!(&input[12..44], &issuer_key_hash);
+
         // TBSCertificate length (3 bytes)
-        assert_eq!(&input[43..46], &[0, 0, 4]);
-        
+        assert_eq!(&input[44..47], &[0, 0, 4]);
+
         // TBSCertificate data
-        assert_eq!(&input[46..50], &certificate);
-        
+        assert_eq!(&input[47..51], &certificate);
+
         // Extensions length (2 bytes)
-        assert_eq!(&input[50..52], &[0, 0]);
+        assert_eq!(&input[51..53], &[0, 0]);
     }
 
     #[test]
@@ -274,18 +279,18 @@ mod tests {
         let timestamp = 1234567890000u64;
         let certificate = vec![0x01, 0x02, 0x03, 0x04];
         let extensions = vec![0xff, 0xfe, 0xfd];
-        
+
         let mut sct = SignedCertificateTimestamp::new(log_id, timestamp);
         sct.extensions = extensions.clone();
-        
+
         let input = sct.get_signature_input(&certificate, LogEntryType::X509Entry, None);
-        
+
         // Check extensions at the end
-        let ext_len_offset = 18;
+        let ext_len_offset = 19;
         let ext_len_bytes = &input[ext_len_offset..ext_len_offset + 2];
         let ext_len = u16::from_be_bytes(ext_len_bytes.try_into().unwrap());
         assert_eq!(ext_len, 3);
-        
+
         let ext_data = &input[ext_len_offset + 2..ext_len_offset + 2 + 3];
         assert_eq!(ext_data, &extensions);
     }
@@ -294,10 +299,10 @@ mod tests {
     fn test_log_id_to_hex() {
         let log_id = create_test_log_id();
         let hex_string = log_id.to_hex();
-        
+
         // Should be 64 characters (32 bytes * 2)
         assert_eq!(hex_string.len(), 64);
-        
+
         // Should be valid hex
         assert!(hex_string.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -307,10 +312,10 @@ mod tests {
         let (signing_key, _) = create_test_key_pair();
         let log_id = create_test_log_id();
         let private_key_bytes = signing_key.to_bytes();
-        
+
         let builder = SctBuilder::from_private_key_bytes(log_id.clone(), &private_key_bytes);
         assert!(builder.is_ok());
-        
+
         // Test with invalid key bytes
         let invalid_key = vec![0x00; 16]; // Too short
         let builder_err = SctBuilder::from_private_key_bytes(log_id, &invalid_key);
@@ -322,36 +327,37 @@ mod tests {
         let (signing_key, verifying_key) = create_test_key_pair();
         let log_id = create_test_log_id();
         let private_key_bytes = signing_key.to_bytes();
-        
-        let builder = SctBuilder::from_private_key_bytes(log_id.clone(), &private_key_bytes).unwrap();
-        
+
+        let builder =
+            SctBuilder::from_private_key_bytes(log_id.clone(), &private_key_bytes).unwrap();
+
         let certificate = vec![0x01, 0x02, 0x03, 0x04, 0x05];
         let timestamp = 1234567890000u64;
-        
+
         let sct = builder
             .create_sct_with_timestamp(&certificate, LogEntryType::X509Entry, None, timestamp)
             .unwrap();
-        
+
         // Verify SCT fields
         assert_eq!(sct.version, SctVersion::V1);
         assert_eq!(sct.log_id, log_id);
         assert_eq!(sct.timestamp, timestamp);
         assert!(sct.extensions.is_empty());
         assert!(!sct.signature.is_empty());
-        
+
         // Verify signature format
         assert_eq!(sct.signature[0], 4); // SHA-256
         assert_eq!(sct.signature[1], 3); // ECDSA
-        
+
         // Extract signature length
         let sig_len = u16::from_be_bytes([sct.signature[2], sct.signature[3]]);
         assert_eq!(sig_len as usize, sct.signature.len() - 4);
-        
+
         // Verify the signature
         let signature_input = sct.get_signature_input(&certificate, LogEntryType::X509Entry, None);
         let sig_bytes = &sct.signature[4..];
         let signature = Signature::from_bytes(sig_bytes.into()).unwrap();
-        
+
         assert!(verifying_key.verify(&signature_input, &signature).is_ok());
     }
 
@@ -360,13 +366,14 @@ mod tests {
         let (signing_key, verifying_key) = create_test_key_pair();
         let log_id = create_test_log_id();
         let private_key_bytes = signing_key.to_bytes();
-        
-        let builder = SctBuilder::from_private_key_bytes(log_id.clone(), &private_key_bytes).unwrap();
-        
+
+        let builder =
+            SctBuilder::from_private_key_bytes(log_id.clone(), &private_key_bytes).unwrap();
+
         let certificate = vec![0x01, 0x02, 0x03, 0x04, 0x05];
         let issuer_key_hash = vec![0xbb; 32];
         let timestamp = 1234567890000u64;
-        
+
         let sct = builder
             .create_sct_with_timestamp(
                 &certificate,
@@ -375,7 +382,7 @@ mod tests {
                 timestamp,
             )
             .unwrap();
-        
+
         // Verify the signature
         let signature_input = sct.get_signature_input(
             &certificate,
@@ -384,7 +391,7 @@ mod tests {
         );
         let sig_bytes = &sct.signature[4..];
         let signature = Signature::from_bytes(sig_bytes.into()).unwrap();
-        
+
         assert!(verifying_key.verify(&signature_input, &signature).is_ok());
     }
 
@@ -392,7 +399,7 @@ mod tests {
     fn test_sct_serialization() {
         let log_id = create_test_log_id();
         let timestamp = 1234567890000u64;
-        
+
         let sct = SignedCertificateTimestamp {
             version: SctVersion::V1,
             log_id: log_id.clone(),
@@ -400,11 +407,11 @@ mod tests {
             extensions: vec![0x01, 0x02],
             signature: vec![0x03, 0x04, 0x05],
         };
-        
+
         // Test JSON serialization
         let json = serde_json::to_string(&sct).unwrap();
         let deserialized: SignedCertificateTimestamp = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.version, sct.version);
         assert_eq!(deserialized.log_id, sct.log_id);
         assert_eq!(deserialized.timestamp, sct.timestamp);
@@ -417,11 +424,11 @@ mod tests {
         let log_id = create_test_log_id();
         let timestamp = 1234567890000u64;
         let certificate = vec![0x01, 0x02, 0x03, 0x04];
-        
+
         let sct = SignedCertificateTimestamp::new(log_id, timestamp);
         let input = sct.get_signature_input(&certificate, LogEntryType::PrecertEntry, None);
-        
+
         // Should use zeros for missing issuer key hash
-        assert_eq!(&input[11..43], &[0u8; 32]);
+        assert_eq!(&input[12..44], &[0u8; 32]);
     }
 }
