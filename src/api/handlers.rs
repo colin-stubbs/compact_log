@@ -13,7 +13,7 @@ use axum::{
     http::StatusCode,
     response::Json,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -93,7 +93,7 @@ pub async fn add_chain(
             id: existing_sct_entry.sct.log_id.to_hex(),
             timestamp: existing_sct_entry.sct.timestamp,
             extensions: STANDARD.encode(&existing_sct_entry.sct.extensions),
-            signature: BASE64.encode(&existing_sct_entry.sct.signature),
+            signature: STANDARD.encode(&existing_sct_entry.sct.signature),
         };
         return Ok(Json(response));
     }
@@ -176,7 +176,7 @@ pub async fn add_chain(
         id: sct.log_id.to_hex(),
         timestamp: sct.timestamp,
         extensions: STANDARD.encode(&sct.extensions),
-        signature: BASE64.encode(&sct.signature),
+        signature: STANDARD.encode(&sct.signature),
     };
 
     Ok(Json(response))
@@ -314,7 +314,7 @@ pub async fn add_pre_chain(
             id: existing_sct_entry.sct.log_id.to_hex(),
             timestamp: existing_sct_entry.sct.timestamp,
             extensions: STANDARD.encode(&existing_sct_entry.sct.extensions),
-            signature: BASE64.encode(&existing_sct_entry.sct.signature),
+            signature: STANDARD.encode(&existing_sct_entry.sct.signature),
         };
         return Ok(Json(response));
     }
@@ -356,7 +356,7 @@ pub async fn add_pre_chain(
         id: sct.log_id.to_hex(),
         timestamp: sct.timestamp,
         extensions: STANDARD.encode(&sct.extensions),
-        signature: BASE64.encode(&sct.signature),
+        signature: STANDARD.encode(&sct.signature),
     };
 
     Ok(Json(response))
@@ -408,7 +408,7 @@ pub async fn get_proof_by_hash(
     State(state): State<Arc<ApiState>>,
     Query(params): Query<GetProofByHashRequest>,
 ) -> ApiResult<GetProofByHashResponse> {
-    let hash = BASE64.decode(&params.hash).map_err(|_| {
+    let hash = STANDARD.decode(&params.hash).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -581,8 +581,8 @@ pub async fn get_entries(
             }
 
             let leaf_entry = LeafEntry {
-                leaf_input: BASE64.encode(&leaf_input),
-                extra_data: BASE64.encode(&extra_data),
+                leaf_input: STANDARD.encode(&leaf_input),
+                extra_data: STANDARD.encode(&extra_data),
             };
 
             entries.push(leaf_entry);
@@ -601,7 +601,7 @@ pub async fn get_roots(State(state): State<Arc<ApiState>>) -> ApiResult<GetRoots
         // Convert DER certificates to base64
         let certificates = root_certs
             .into_iter()
-            .map(|cert_der| BASE64.encode(&cert_der))
+            .map(|cert_der| STANDARD.encode(&cert_der))
             .collect();
 
         Ok(Json(GetRootsResponse { certificates }))
@@ -745,8 +745,8 @@ pub async fn get_entry_and_proof(
         })?;
 
     let response = GetEntryAndProofResponse {
-        leaf_input: BASE64.encode(&leaf_input),
-        extra_data: BASE64.encode(&extra_data),
+        leaf_input: STANDARD.encode(&leaf_input),
+        extra_data: STANDARD.encode(&extra_data),
         audit_path: serialization::inclusion_proof_to_audit_path(&proof),
     };
 
