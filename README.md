@@ -30,7 +30,7 @@ CompactLog makes three fundamental design choices that differentiate it from oth
 
 ### How MD is Eliminated Entirely
 
-Many CT log implementations have a Merge Delay (MMD) of minutes to hours, where submitted certificates aren't yet included in the Merkle tree. This exists because:
+Many CT log implementations have a Merge Delay (MD) of minutes to hours, where submitted certificates aren't yet included in the Merkle tree. This exists because:
 
 - Many implementations issue SCTs immediately, then incorporate certificates later via background processes.
 - Some implementations have expensive tree update operations.
