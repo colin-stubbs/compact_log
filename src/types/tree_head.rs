@@ -33,6 +33,9 @@ impl SignedTreeHead {
     pub fn get_signature_input(&self) -> Vec<u8> {
         let mut input = Vec::new();
 
+        // Version: v1 (0)
+        input.push(0);
+
         // SignatureType: tree_hash (1)
         input.push(1);
 
@@ -172,23 +175,24 @@ mod tests {
         let input = sth.get_signature_input();
         
         // Check structure
-        assert_eq!(input[0], 1); // SignatureType: tree_hash
+        assert_eq!(input[0], 0); // Version: v1
+        assert_eq!(input[1], 1); // SignatureType: tree_hash
         
         // Timestamp (8 bytes)
-        let ts_bytes = &input[1..9];
+        let ts_bytes = &input[2..10];
         let ts_value = u64::from_be_bytes(ts_bytes.try_into().unwrap());
         assert_eq!(ts_value, timestamp);
         
         // Tree size (8 bytes)
-        let size_bytes = &input[9..17];
+        let size_bytes = &input[10..18];
         let size_value = u64::from_be_bytes(size_bytes.try_into().unwrap());
         assert_eq!(size_value, tree_size);
         
         // Root hash (32 bytes)
-        assert_eq!(&input[17..49], &root_hash[..]);
+        assert_eq!(&input[18..50], &root_hash[..]);
         
-        // Total length should be 1 + 8 + 8 + 32 = 49
-        assert_eq!(input.len(), 49);
+        // Total length should be 1 + 1 + 8 + 8 + 32 = 50
+        assert_eq!(input.len(), 50);
     }
 
     #[test]
@@ -373,8 +377,9 @@ mod tests {
         let input = sth.get_signature_input();
         
         // Should still generate valid signature input
-        assert_eq!(input.len(), 17); // 1 + 8 + 8 + 0
-        assert_eq!(input[0], 1); // SignatureType
+        assert_eq!(input.len(), 18); // 1 + 1 + 8 + 8 + 0
+        assert_eq!(input[0], 0); // Version: v1
+        assert_eq!(input[1], 1); // SignatureType: tree_hash
     }
 
     #[test]
@@ -387,7 +392,8 @@ mod tests {
         let input = sth.get_signature_input();
         
         // Verify large tree size is properly encoded
-        let size_bytes = &input[9..17];
+        // After version (1 byte), signature type (1 byte), and timestamp (8 bytes)
+        let size_bytes = &input[10..18];
         let size_value = u64::from_be_bytes(size_bytes.try_into().unwrap());
         assert_eq!(size_value, u64::MAX);
     }
