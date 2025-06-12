@@ -118,6 +118,11 @@ impl Rfc6962Validator {
         })
     }
 
+    /// Get the validation configuration
+    pub fn get_config(&self) -> &Rfc6962ValidationConfig {
+        &self.config
+    }
+
     /// Analyze a certificate chain and return validation context
     fn analyze_chain(&self, chain: &[Vec<u8>]) -> Result<ChainValidationContext> {
         if chain.is_empty() {
