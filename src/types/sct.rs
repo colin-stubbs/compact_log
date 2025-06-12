@@ -108,6 +108,10 @@ impl LogId {
     pub fn to_hex(&self) -> String {
         hex::encode(&self.0)
     }
+    
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 /// Builder for creating SCTs with proper signatures
