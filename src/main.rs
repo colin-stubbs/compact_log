@@ -5,7 +5,7 @@ use p256::SecretKey;
 use serde::{Deserialize, Serialize};
 use slatedb::config::{
     CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-    ObjectStoreCacheOptions, SstIteratorOptions,
+    ObjectStoreCacheOptions,
 };
 use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
 use slatedb::{
@@ -417,12 +417,6 @@ async fn initialize_storage(
     let compactor_options: CompactorOptions = CompactorOptions {
         poll_interval: Duration::from_millis(100),
         max_concurrent_compactions: num_cpus::get(),
-        sst_iterator_options: SstIteratorOptions {
-            max_fetch_tasks: 16,
-            blocks_to_fetch: 2048,
-            cache_blocks: true,
-            eager_spawn: true,
-        },
         ..default::Default::default()
     };
 
@@ -491,7 +485,7 @@ async fn initialize_storage(
     let db = Db::builder(path.clone(), blob_store.clone())
         .with_settings(db_options)
         .with_block_cache(block_cache)
-        .with_sst_block_size(65_536)
+        .with_sst_block_size(slatedb::SstBlockSize::Block64Kib)
         .with_compaction_runtime(background_runtime.clone())
         .with_gc_runtime(background_runtime.clone())
         .build()
