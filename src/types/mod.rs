@@ -105,7 +105,6 @@ pub struct DeduplicatedLogEntry {
     pub leaf_data: Vec<u8>,
 }
 
-
 impl DeduplicatedLogEntry {
     /// Create a new deduplicated log entry from a regular log entry
     pub fn from_log_entry(entry: &LogEntry) -> Self {
@@ -305,8 +304,6 @@ impl LogEntry {
 
         Ok(false)
     }
-
-
 
     /// Serialize the log entry to CT binary format
     pub fn serialize(&self) -> Result<Vec<u8>> {
@@ -793,7 +790,6 @@ mod tests {
         assert_eq!(proof_req.tree_size, deserialized.tree_size);
     }
 
-
     #[test]
     fn test_remove_poison_extension_and_transform() {
         // Test with pre-certificate and empty chain (legacy behavior)
@@ -832,5 +828,4 @@ mod tests {
         // Verify issuer was NOT changed (since it's not a Precertificate Signing Certificate)
         assert_eq!(tbs.issuer, original_issuer);
     }
-
 }

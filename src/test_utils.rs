@@ -219,18 +219,18 @@ pub mod test_utils {
     pub fn extract_test_issuer_key_hash(chain: &[Vec<u8>]) -> Vec<u8> {
         use sha2::{Digest, Sha256};
         use x509_cert::Certificate;
-        
+
         // For test purposes, we use a simplified extraction that assumes
         // the issuer is always at index 1 in the chain
         assert!(chain.len() >= 2, "Chain must have at least 2 certificates");
-        
+
         let issuer_cert = Certificate::from_der(&chain[1]).unwrap();
         let spki_der = issuer_cert
             .tbs_certificate
             .subject_public_key_info
             .to_der()
             .unwrap();
-        
+
         let mut hasher = Sha256::new();
         hasher.update(&spki_der);
         hasher.finalize().to_vec()

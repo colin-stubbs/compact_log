@@ -387,7 +387,8 @@ impl<H: Digest> InclusionProof<H> {
         }
 
         // Check that the proof is the right size
-        let expected_proof_size = indices_for_inclusion_proof(num_leaves, leaf_idx).len() * <H as Digest>::output_size();
+        let expected_proof_size =
+            indices_for_inclusion_proof(num_leaves, leaf_idx).len() * <H as Digest>::output_size();
         if self.proof.len() != expected_proof_size {
             return Err("invalid proof length");
         }
@@ -405,7 +406,7 @@ impl<H: Digest> InclusionProof<H> {
         // Otherwise, start hashing up the tree
         let mut cur_idx = InternalIdx::from(LeafIdx::new(leaf_idx));
         let mut cur_hash = leaf_hash_value;
-        
+
         // Process each sibling hash in the proof
         for sibling_hash_bytes in self.proof.chunks(<H as Digest>::output_size()) {
             // Convert sibling hash bytes to proper type
@@ -499,7 +500,7 @@ impl<H: Digest> ConsistencyProof<H> {
     ) -> Result<(), &'static str> {
         let num_newtree_leaves = new_root.num_leaves();
         let num_oldtree_leaves = old_root.num_leaves();
-        
+
         if num_oldtree_leaves == 0 {
             return Err("cannot verify consistency from empty tree");
         }
@@ -513,7 +514,11 @@ impl<H: Digest> ConsistencyProof<H> {
         // Check that the proof is the right size
         let num_additions = num_newtree_leaves - num_oldtree_leaves;
         let expected_proof_size = {
-            let num_hashes = crate::merkle_tree::consistency::indices_for_consistency_proof(num_oldtree_leaves, num_additions).len();
+            let num_hashes = crate::merkle_tree::consistency::indices_for_consistency_proof(
+                num_oldtree_leaves,
+                num_additions,
+            )
+            .len();
             <H as Digest>::output_size() * num_hashes
         };
         if expected_proof_size != self.proof.len() {
@@ -525,7 +530,8 @@ impl<H: Digest> ConsistencyProof<H> {
             num_oldtree_leaves.is_power_of_two() || num_oldtree_leaves == num_newtree_leaves;
 
         // Split the proof into digest-sized chunks
-        let mut digests = self.proof
+        let mut digests = self
+            .proof
             .chunks(<H as Digest>::output_size())
             .map(|chunk| {
                 let mut hash = digest::Output::<H>::default();
@@ -541,7 +547,8 @@ impl<H: Digest> ConsistencyProof<H> {
             // We can unwrap here because the proof size cannot be 0
             let first_hash = digests.next().unwrap();
             // Our starting point will be a node common to both trees
-            let starting_idx = first_node_with_diverging_parents(num_newtree_leaves, num_oldtree_leaves);
+            let starting_idx =
+                first_node_with_diverging_parents(num_newtree_leaves, num_oldtree_leaves);
             (starting_idx, first_hash)
         };
         let mut running_tree_hash = running_oldtree_hash.clone();

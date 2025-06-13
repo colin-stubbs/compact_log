@@ -106,7 +106,6 @@ mod tests {
         assert!(indices.is_empty());
     }
 
-
     #[test]
     fn test_indices_for_consistency_proof_power_of_two() {
         // When old_size is a power of 2
@@ -260,5 +259,4 @@ mod tests {
             );
         }
     }
-
 }

@@ -94,7 +94,7 @@ where
                 }
             })
             .collect();
-        
+
         futures::future::try_join_all(futures).await
     }
 
