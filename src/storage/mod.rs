@@ -301,6 +301,8 @@ impl CtStorage {
         let mut dedup_savings = 0usize;
         let mut bytes_saved = 0u64;
         let mut dedup_check_time_ms = 0u64;
+        let mut total_certs_in_batch = 0usize;
+        let mut total_certs_skipped = 0usize;
 
         tracing::trace!(
             "Elapsed time before processing entries: {:?}",
@@ -358,6 +360,7 @@ impl CtStorage {
             for (_orig_idx, _entry_data, _cert_hash, _sct, log_entry) in entry_metadata.iter() {
                 if log_entry.entry_type != crate::types::LogEntryType::PrecertEntry {
                     let cert_hash = DeduplicatedLogEntry::hash_certificate(&log_entry.certificate);
+                    total_certs_in_batch += 1;
                     if cert_hashes_to_check.insert(cert_hash) {
                         cert_data_map.insert(cert_hash, log_entry.certificate.clone());
                     }
@@ -367,6 +370,7 @@ impl CtStorage {
                 if let Some(chain) = &log_entry.chain {
                     for cert in chain {
                         let cert_hash = DeduplicatedLogEntry::hash_certificate(cert);
+                        total_certs_in_batch += 1;
                         if cert_hashes_to_check.insert(cert_hash) {
                             cert_data_map.insert(cert_hash, cert.clone());
                         }
@@ -375,6 +379,7 @@ impl CtStorage {
 
                 if let Some(precert) = &log_entry.original_precert {
                     let precert_hash = DeduplicatedLogEntry::hash_certificate(precert);
+                    total_certs_in_batch += 1;
                     if cert_hashes_to_check.insert(precert_hash) {
                         cert_data_map.insert(precert_hash, precert.clone());
                     }
@@ -393,6 +398,7 @@ impl CtStorage {
                 .collect();
 
             let dedup_check_start = Instant::now();
+
             let existence_results = match merkle_tree.check_keys_exist(&keys_to_check).await {
                 Ok(results) => results,
                 Err(e) => {
@@ -414,21 +420,33 @@ impl CtStorage {
             dedup_savings = existing_certs.len();
             bytes_saved = 0;
 
-            if dedup_savings > 0 {
-                // Calculate bytes saved by not writing duplicate certificates
-                for (hash, cert_data) in cert_data_map.iter() {
-                    if existing_certs.contains(hash) {
-                        bytes_saved += cert_data.len() as u64;
+            // Calculate actual certificates skipped and bytes saved
+            for (_orig_idx, _entry_data, _cert_hash, _sct, log_entry) in entry_metadata.iter() {
+                if log_entry.entry_type != crate::types::LogEntryType::PrecertEntry {
+                    let cert_hash = DeduplicatedLogEntry::hash_certificate(&log_entry.certificate);
+                    if existing_certs.contains(&cert_hash) {
+                        total_certs_skipped += 1;
+                        bytes_saved += log_entry.certificate.len() as u64;
                     }
                 }
 
-                tracing::debug!(
-                    "Certificate deduplication: {} unique certs, {} already exist, saving {} writes ({} bytes)",
-                    cert_hashes_to_check.len(),
-                    dedup_savings,
-                    dedup_savings,
-                    bytes_saved
-                );
+                if let Some(chain) = &log_entry.chain {
+                    for cert in chain {
+                        let cert_hash = DeduplicatedLogEntry::hash_certificate(cert);
+                        if existing_certs.contains(&cert_hash) {
+                            total_certs_skipped += 1;
+                            bytes_saved += cert.len() as u64;
+                        }
+                    }
+                }
+
+                if let Some(precert) = &log_entry.original_precert {
+                    let precert_hash = DeduplicatedLogEntry::hash_certificate(precert);
+                    if existing_certs.contains(&precert_hash) {
+                        total_certs_skipped += 1;
+                        bytes_saved += precert.len() as u64;
+                    }
+                }
             }
 
             // Prepare all additional data with correct indices
@@ -562,9 +580,9 @@ impl CtStorage {
         }
 
         // Update deduplication stats if we had any certificates
-        if !cert_hashes_to_check.is_empty() {
-            stats.total_certs_checked += cert_hashes_to_check.len() as u64;
-            stats.total_certs_deduplicated += dedup_savings as u64;
+        if total_certs_in_batch > 0 {
+            stats.total_certs_checked += total_certs_in_batch as u64;
+            stats.total_certs_deduplicated += total_certs_skipped as u64;
             stats.total_bytes_saved += bytes_saved;
             stats.total_dedup_check_time_ms += dedup_check_time_ms;
         }
