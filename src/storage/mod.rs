@@ -298,7 +298,6 @@ impl CtStorage {
 
         // Deduplication tracking variables
         let mut cert_hashes_to_check = std::collections::HashSet::new();
-        let mut dedup_savings = 0usize;
         let mut bytes_saved = 0u64;
         let mut dedup_check_time_ms = 0u64;
         let mut total_certs_in_batch = 0usize;
@@ -417,7 +416,6 @@ impl CtStorage {
                 .filter_map(|(hash, exists)| if *exists { Some(*hash) } else { None })
                 .collect();
 
-            dedup_savings = existing_certs.len();
             bytes_saved = 0;
 
             // Calculate actual certificates skipped and bytes saved
