@@ -150,8 +150,7 @@ impl RootCertificateStore {
             // Clean up the PEM certificate data
             // Remove any tabs, carriage returns, and trim whitespace
             let cleaned_pem = pem_cert
-                .replace('\t', "")
-                .replace('\r', "")
+                .replace(['\t', '\r'], "")
                 .lines()
                 .map(|line| line.trim())
                 .filter(|line| !line.is_empty())

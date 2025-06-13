@@ -108,7 +108,7 @@ impl Rfc6962Validator {
 
         let trusted_root_hashes = trusted_roots
             .iter()
-            .map(|cert| Self::certificate_hash(cert))
+            .map(Self::certificate_hash)
             .collect::<Result<HashSet<_>>>()?;
 
         Ok(Self {
@@ -345,7 +345,7 @@ impl Rfc6962Validator {
 
         // Check if the last certificate is a trusted root
         let last_cert_hash = Self::certificate_hash(last_cert)?;
-        let last_cert_fingerprint = hex::encode(&last_cert_hash);
+        let last_cert_fingerprint = hex::encode(last_cert_hash);
 
         tracing::debug!(
             "Last certificate fingerprint: {}, subject: {}",
@@ -409,7 +409,7 @@ impl Rfc6962Validator {
                     match cert_x509.verify(&root_pubkey) {
                         Ok(true) => {
                             let root_hash = Self::certificate_hash(root)?;
-                            let root_fingerprint = hex::encode(&root_hash);
+                            let root_fingerprint = hex::encode(root_hash);
                             tracing::debug!(
                                 "Certificate at index {} verified by root {} ({})",
                                 idx,

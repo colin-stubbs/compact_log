@@ -315,7 +315,7 @@ impl CtStorage {
                     entry_metadata.push((
                         i,
                         entry_data,
-                        entry.cert_hash.clone(),
+                        entry.cert_hash,
                         entry.sct.clone(),
                         entry.log_entry.clone(), // Keep original for certificate storage
                     ));
@@ -461,7 +461,7 @@ impl CtStorage {
                 // For get-proof-by-hash API, we need to store hash->index mapping
                 use sha2::{Digest, Sha256};
                 let mut hasher = Sha256::new();
-                hasher.update(&[0x00]); // Leaf prefix
+                hasher.update([0x00]); // Leaf prefix
                 hasher.update(&leaf_data_vec[vec_idx]);
                 let computed_leaf_hash: [u8; 32] = hasher.finalize().into();
 
@@ -673,7 +673,7 @@ impl CtStorage {
             == crate::types::LogEntryType::PrecertEntry
         {
             let storage_clone = self.clone();
-            let cert_hash = dedup_entry.certificate_hash.clone();
+            let cert_hash = dedup_entry.certificate_hash;
             let precert_result =
                 tokio::spawn(async move { storage_clone.get_certificate(&cert_hash).await })
                     .await
@@ -687,7 +687,7 @@ impl CtStorage {
                     .iter()
                     .map(|hash| {
                         let storage_clone = self.clone();
-                        let hash_clone = hash.clone();
+                        let hash_clone = *hash;
                         tokio::spawn(
                             async move { storage_clone.get_certificate(&hash_clone).await },
                         )
@@ -724,7 +724,7 @@ impl CtStorage {
             (tbs_certificate, Some(precert_result))
         } else {
             let storage_clone = self.clone();
-            let cert_hash = dedup_entry.certificate_hash.clone();
+            let cert_hash = dedup_entry.certificate_hash;
             let main_cert_handle =
                 tokio::spawn(async move { storage_clone.get_certificate(&cert_hash).await });
 
@@ -741,7 +741,7 @@ impl CtStorage {
                 .iter()
                 .map(|hash| {
                     let storage_clone = self.clone();
-                    let hash_clone = hash.clone();
+                    let hash_clone = *hash;
                     tokio::spawn(async move { storage_clone.get_certificate(&hash_clone).await })
                 })
                 .collect::<Vec<_>>()
@@ -1016,7 +1016,7 @@ mod tests {
             .unwrap();
 
         let original_precert_hash =
-            DeduplicatedLogEntry::hash_certificate(&log_entry.original_precert.as_ref().unwrap());
+            DeduplicatedLogEntry::hash_certificate(log_entry.original_precert.as_ref().unwrap());
         assert_eq!(dedup_entry.certificate_hash, original_precert_hash);
         assert_eq!(
             dedup_entry.original_precert_hash,
@@ -1174,7 +1174,7 @@ mod tests {
         // Calculate leaf hash
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(&[0x00]); // Leaf prefix
+        hasher.update([0x00]); // Leaf prefix
         hasher.update(&log_entry.leaf_data);
         let leaf_hash = hasher.finalize();
 
@@ -1557,13 +1557,13 @@ mod tests {
         let issuer_key_hash1 =
             crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain);
         let tbs1 =
-            TbsExtractor::extract_tbs_certificate(&precert1, &vec![issuer_cert.clone()]).unwrap();
+            TbsExtractor::extract_tbs_certificate(&precert1, &[issuer_cert.clone()]).unwrap();
 
         let full_chain2 = vec![precert2.clone(), issuer_cert.clone()];
         let issuer_key_hash2 =
             crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain2);
         let tbs2 =
-            TbsExtractor::extract_tbs_certificate(&precert2, &vec![issuer_cert.clone()]).unwrap();
+            TbsExtractor::extract_tbs_certificate(&precert2, &[issuer_cert.clone()]).unwrap();
 
         let timestamp1 = Utc.timestamp_millis_opt(1234567890000).unwrap();
         let entry1 = LogEntry::new_precert_with_timestamp(

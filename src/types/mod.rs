@@ -715,10 +715,10 @@ mod tests {
     #[test]
     fn test_is_precertificate() {
         let normal_cert = create_test_certificate();
-        assert_eq!(LogEntry::is_precertificate(&normal_cert).unwrap(), false);
+        assert!(!LogEntry::is_precertificate(&normal_cert).unwrap());
 
         let precert = create_precertificate_with_poison();
-        assert_eq!(LogEntry::is_precertificate(&precert).unwrap(), true);
+        assert!(LogEntry::is_precertificate(&precert).unwrap());
 
         // Test with invalid certificate
         let invalid_cert = vec![0x00, 0x01, 0x02];
@@ -794,7 +794,7 @@ mod tests {
     fn test_remove_poison_extension_and_transform() {
         // Test with pre-certificate and empty chain (legacy behavior)
         let precert = create_precertificate_with_poison();
-        let tbs_cert = TbsExtractor::extract_tbs_certificate(&precert, &vec![]).unwrap();
+        let tbs_cert = TbsExtractor::extract_tbs_certificate(&precert, &[]).unwrap();
 
         // Verify the poison extension was removed
         let tbs = x509_cert::TbsCertificate::from_der(&tbs_cert).unwrap();

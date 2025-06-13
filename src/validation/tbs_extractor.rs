@@ -476,7 +476,7 @@ mod tests {
         let cert = create_basic_certificate("test.example.com", "Test CA");
         let cert_der = cert.to_der().unwrap();
 
-        let result = TbsExtractor::extract_tbs_certificate(&cert_der, &vec![]);
+        let result = TbsExtractor::extract_tbs_certificate(&cert_der, &[]);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -489,7 +489,7 @@ mod tests {
         let precert = create_precertificate("test.example.com", "Test CA");
         let precert_der = precert.to_der().unwrap();
 
-        let tbs_der = TbsExtractor::extract_tbs_certificate(&precert_der, &vec![]).unwrap();
+        let tbs_der = TbsExtractor::extract_tbs_certificate(&precert_der, &[]).unwrap();
         let tbs = TbsCertificate::from_der(&tbs_der).unwrap();
 
         // Verify poison extension was removed
@@ -578,7 +578,7 @@ mod tests {
     #[test]
     fn test_extract_tbs_certificate_invalid_der() {
         let invalid_der = vec![0xFF, 0xFF, 0xFF];
-        let result = TbsExtractor::extract_tbs_certificate(&invalid_der, &vec![]);
+        let result = TbsExtractor::extract_tbs_certificate(&invalid_der, &[]);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -606,13 +606,13 @@ mod tests {
         cert.tbs_certificate.extensions = Some(Extensions::from(vec![poison_ext, san_ext.clone()]));
 
         let cert_der = cert.to_der().unwrap();
-        let tbs_der = TbsExtractor::extract_tbs_certificate(&cert_der, &vec![]).unwrap();
+        let tbs_der = TbsExtractor::extract_tbs_certificate(&cert_der, &[]).unwrap();
         let tbs = TbsCertificate::from_der(&tbs_der).unwrap();
 
         // Verify SAN extension is preserved but poison is removed
         let exts = tbs.extensions.unwrap();
         assert_eq!(exts.len(), 1);
-        assert_eq!(exts.get(0).unwrap().extn_id, SUBJECT_ALTERNATIVE_NAME_OID);
+        assert_eq!(exts.first().unwrap().extn_id, SUBJECT_ALTERNATIVE_NAME_OID);
     }
 
     #[test]
@@ -754,7 +754,7 @@ mod tests {
 
         // Should be able to extract TBS (both poison extensions removed)
         let cert_der = cert.to_der().unwrap();
-        let tbs_der = TbsExtractor::extract_tbs_certificate(&cert_der, &vec![]).unwrap();
+        let tbs_der = TbsExtractor::extract_tbs_certificate(&cert_der, &[]).unwrap();
         let tbs = TbsCertificate::from_der(&tbs_der).unwrap();
 
         // Verify all poison extensions were removed

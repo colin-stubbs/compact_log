@@ -243,7 +243,7 @@ pub async fn add_pre_chain(
                 (
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
-                        error: format!("Invalid X.509 certificate in chain {}", e.to_string()),
+                        error: format!("Invalid X.509 certificate in chain {}", e),
                     }),
                 )
             })?;
@@ -487,7 +487,7 @@ pub async fn get_entries(
 
     let mut entries = Vec::new();
 
-    for (_idx, join_result) in results.into_iter().enumerate() {
+    for join_result in results.into_iter() {
         let result = join_result.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -526,7 +526,7 @@ pub async fn get_entries(
                             extra_data.push((cert_len >> 16) as u8);
                             extra_data.push((cert_len >> 8) as u8);
                             extra_data.push(cert_len as u8);
-                            extra_data.extend_from_slice(&chain_cert);
+                            extra_data.extend_from_slice(chain_cert);
                         }
                     } else {
                         // Empty chain: just the length field (0)
@@ -571,7 +571,7 @@ pub async fn get_entries(
                             extra_data.push((cert_len >> 16) as u8);
                             extra_data.push((cert_len >> 8) as u8);
                             extra_data.push(cert_len as u8);
-                            extra_data.extend_from_slice(&chain_cert);
+                            extra_data.extend_from_slice(chain_cert);
                         }
                     } else {
                         // Empty chain: just the length field (0)
@@ -649,9 +649,7 @@ pub async fn get_entry_and_proof(
         })?;
 
     let chain_data = log_entry
-        .chain
-        .as_ref()
-        .map(|c| c.clone())
+        .chain.clone()
         .unwrap_or_default();
 
     let leaf_input = log_entry

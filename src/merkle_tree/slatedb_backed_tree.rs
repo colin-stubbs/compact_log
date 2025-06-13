@@ -251,7 +251,7 @@ where
         for item in items.iter() {
             let leaf_bytes = postcard::to_stdvec(item)
                 .map_err(|e| SlateDbTreeError::EncodingError(e.to_string()))?;
-            batch.put(&Self::leaf_key(current_num_leaves), &leaf_bytes);
+            batch.put(Self::leaf_key(current_num_leaves), &leaf_bytes);
 
             let new_leaf_idx = LeafIdx::new(current_num_leaves);
             let new_num_leaves = current_num_leaves + 1;
@@ -298,17 +298,17 @@ where
         let final_tree_size = current_num_leaves;
         for (node_idx, node_hash) in computed_hashes.iter() {
             batch.put(
-                &Self::versioned_node_key(*node_idx, final_tree_size),
+                Self::versioned_node_key(*node_idx, final_tree_size),
                 node_hash.as_ref(),
             );
             batch.put(
-                &Self::node_latest_version_key(*node_idx),
-                &final_tree_size.to_be_bytes(),
+                Self::node_latest_version_key(*node_idx),
+                final_tree_size.to_be_bytes(),
             );
         }
 
-        batch.put(META_KEY, &current_num_leaves.to_be_bytes());
-        batch.put(COMMITTED_SIZE_KEY, &current_num_leaves.to_be_bytes());
+        batch.put(META_KEY, current_num_leaves.to_be_bytes());
+        batch.put(COMMITTED_SIZE_KEY, current_num_leaves.to_be_bytes());
 
         // Add additional key-value pairs to the same batch
         for (key, value) in additional_data {
@@ -613,14 +613,14 @@ where
 
         let leaf_bytes = postcard::to_stdvec(&new_val)
             .map_err(|e| SlateDbTreeError::EncodingError(e.to_string()))?;
-        batch.put(&Self::leaf_key(num_leaves), &leaf_bytes);
+        batch.put(Self::leaf_key(num_leaves), &leaf_bytes);
 
         let new_leaf_idx = LeafIdx::new(num_leaves);
         self.recalculate_path_batch(&mut batch, new_leaf_idx, &new_val, num_leaves + 1)
             .await?;
 
-        batch.put(META_KEY, &(num_leaves + 1).to_be_bytes());
-        batch.put(COMMITTED_SIZE_KEY, &(num_leaves + 1).to_be_bytes());
+        batch.put(META_KEY, (num_leaves + 1).to_be_bytes());
+        batch.put(COMMITTED_SIZE_KEY, (num_leaves + 1).to_be_bytes());
 
         self.db.write(batch).await?;
 
@@ -678,12 +678,12 @@ where
         // Store versioned nodes for the final tree state (single-entry batch)
         for (node_idx, node_hash) in computed_hashes.iter() {
             batch.put(
-                &Self::versioned_node_key(*node_idx, num_leaves),
+                Self::versioned_node_key(*node_idx, num_leaves),
                 node_hash.as_ref(),
             );
             batch.put(
-                &Self::node_latest_version_key(*node_idx),
-                &num_leaves.to_be_bytes(),
+                Self::node_latest_version_key(*node_idx),
+                num_leaves.to_be_bytes(),
             );
         }
 
@@ -2108,20 +2108,20 @@ mod tests {
 
         // Manually compute leaf hashes with 0x00 prefix
         let mut leaf1_hasher = Sha256::new();
-        leaf1_hasher.update(&[0x00]); // Leaf prefix
+        leaf1_hasher.update([0x00]); // Leaf prefix
         leaf1_hasher.update(&leaf1.data);
         let expected_leaf1_hash = leaf1_hasher.finalize();
 
         let mut leaf2_hasher = Sha256::new();
-        leaf2_hasher.update(&[0x00]); // Leaf prefix
+        leaf2_hasher.update([0x00]); // Leaf prefix
         leaf2_hasher.update(&leaf2.data);
         let expected_leaf2_hash = leaf2_hasher.finalize();
 
         // Compute expected parent hash with 0x01 prefix
         let mut parent_hasher = Sha256::new();
-        parent_hasher.update(&[0x01]); // Parent prefix
-        parent_hasher.update(&expected_leaf1_hash);
-        parent_hasher.update(&expected_leaf2_hash);
+        parent_hasher.update([0x01]); // Parent prefix
+        parent_hasher.update(expected_leaf1_hash);
+        parent_hasher.update(expected_leaf2_hash);
         let expected_parent_hash = parent_hasher.finalize();
 
         // Get actual hashes from tree
@@ -2554,8 +2554,8 @@ mod tests {
         let root1 = tree.root().await.unwrap();
 
         let mut expected_single = Sha256::new();
-        expected_single.update(&[0x00]); // Leaf prefix
-        expected_single.update(&[0x42]);
+        expected_single.update([0x00]); // Leaf prefix
+        expected_single.update([0x42]);
         let expected_single_hash = expected_single.finalize();
         assert_eq!(
             root1.as_bytes(),
@@ -2570,7 +2570,7 @@ mod tests {
 
         // This root should be different from just hashing the two leaves
         let mut wrong_hash = Sha256::new();
-        wrong_hash.update(&[0x42, 0x43]);
+        wrong_hash.update([0x42, 0x43]);
         let wrong_root = wrong_hash.finalize();
         assert_ne!(
             root2.as_bytes(),
@@ -2596,11 +2596,9 @@ mod tests {
         for i in 0..7 {
             let proof = tree.prove_inclusion_at_size(i, 7).await.unwrap();
             proof
-                .verify(&leaves[i as usize], i as u64, &root7)
-                .expect(&format!(
-                    "Inclusion proof for leaf {} in tree of size 7 should verify",
-                    i
-                ));
+                .verify(&leaves[i as usize], i, &root7)
+                .unwrap_or_else(|_| panic!("Inclusion proof for leaf {} in tree of size 7 should verify",
+                    i));
         }
 
         // Also test with size 5 (another non-power of 2)
@@ -2618,11 +2616,9 @@ mod tests {
         for i in 0..5 {
             let proof = tree2.prove_inclusion_at_size(i, 5).await.unwrap();
             proof
-                .verify(&leaves5[i as usize], i as u64, &root5)
-                .expect(&format!(
-                    "Inclusion proof for leaf {} in tree of size 5 should verify",
-                    i
-                ));
+                .verify(&leaves5[i as usize], i, &root5)
+                .unwrap_or_else(|_| panic!("Inclusion proof for leaf {} in tree of size 5 should verify",
+                    i));
         }
     }
 
