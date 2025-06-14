@@ -1,5 +1,5 @@
 use crate::types::{CtError, Result};
-use crate::validation::CcadbEnvironment;
+use crate::validation::{CcadbEnvironment, Rfc6962ValidationConfig, Rfc6962Validator};
 use csv::Reader;
 use der::{Decode, Encode};
 use std::collections::HashMap;
@@ -306,6 +306,8 @@ pub struct CcadbWorker {
     environment: CcadbEnvironment,
     store: RootCertificateStore,
     trusted_roots_dir: std::path::PathBuf,
+    validator: Option<Arc<RwLock<Rfc6962Validator>>>,
+    validation_config: Option<Rfc6962ValidationConfig>,
 }
 
 impl CcadbWorker {
@@ -318,7 +320,20 @@ impl CcadbWorker {
             environment,
             store,
             trusted_roots_dir,
+            validator: None,
+            validation_config: None,
         }
+    }
+
+    /// Set the validator to update when roots change
+    pub fn with_validator(
+        mut self,
+        validator: Arc<RwLock<Rfc6962Validator>>,
+        config: Rfc6962ValidationConfig,
+    ) -> Self {
+        self.validator = Some(validator);
+        self.validation_config = Some(config);
+        self
     }
 
     /// Fetch and update root certificates from CCADB
@@ -351,10 +366,26 @@ impl CcadbWorker {
             .persist_to_directory(&self.trusted_roots_dir)
             .await?;
 
+        let total_certs = self.store.count().await;
         tracing::info!(
             "Successfully updated CCADB roots. Total certificates: {}",
-            self.store.count().await
+            total_certs
         );
+
+        if let (Some(validator_lock), Some(config)) = (&self.validator, &self.validation_config) {
+            let trusted_roots = self.store.get_all_certificates().await;
+
+            match Rfc6962Validator::with_trusted_roots(config.clone(), trusted_roots) {
+                Ok(new_validator) => {
+                    let mut validator_guard = validator_lock.write().await;
+                    *validator_guard = new_validator;
+                    tracing::info!("Updated validator with {} trusted roots", total_certs);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to update validator: {}", e);
+                }
+            }
+        }
 
         Ok(())
     }

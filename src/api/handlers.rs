@@ -66,8 +66,9 @@ pub async fn add_chain(
     })?;
 
     // Validate certificate chain
-    if let Some(validator) = &state.validator {
-        validator.validate_chain(&chain).map_err(|e| {
+    if let Some(validator_lock) = &state.validator {
+        let validator = validator_lock.read().await;
+        validator.validate_chain(&chain).await.map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
@@ -255,8 +256,9 @@ pub async fn add_pre_chain(
     let mut complete_chain = vec![precert_der.clone()];
     complete_chain.extend(processed_chain.clone());
 
-    if let Some(validator) = &state.validator {
-        validator.validate_chain(&complete_chain).map_err(|e| {
+    if let Some(validator_lock) = &state.validator {
+        let validator = validator_lock.read().await;
+        validator.validate_chain(&complete_chain).await.map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
@@ -266,7 +268,8 @@ pub async fn add_pre_chain(
         })?;
     }
 
-    let issuer_key_hash = if let Some(validator) = &state.validator {
+    let issuer_key_hash = if let Some(validator_lock) = &state.validator {
+        let validator = validator_lock.read().await;
         validator
             .extract_issuer_key_hash(&complete_chain)
             .map(|hash| hash.to_vec())
@@ -593,7 +596,8 @@ pub async fn get_entries(
 }
 
 pub async fn get_roots(State(state): State<Arc<ApiState>>) -> ApiResult<GetRootsResponse> {
-    if let Some(validator) = &state.validator {
+    if let Some(validator_lock) = &state.validator {
+        let validator = validator_lock.read().await;
         let root_certs = validator
             .get_accepted_roots()
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
@@ -773,7 +777,8 @@ pub async fn inclusion_request(
 
     let mmd = 0;
 
-    let temporal_interval = if let Some(validator) = &state.validator {
+    let temporal_interval = if let Some(validator_lock) = &state.validator {
+        let validator = validator_lock.read().await;
         let config = validator.get_config();
         if let Some(window) = &config.temporal_window {
             TemporalInterval {

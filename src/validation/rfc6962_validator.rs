@@ -2,9 +2,12 @@ use crate::oids::*;
 use crate::types::{CtError, Result};
 use chrono::{DateTime, Utc};
 use der::{Decode, Encode};
+use moka::future::Cache;
+use openssl::x509::X509;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use x509_cert::{
     ext::pkix::{BasicConstraints, ExtendedKeyUsage},
     Certificate,
@@ -81,6 +84,8 @@ pub struct Rfc6962Validator {
     pub(crate) trusted_roots: Vec<Certificate>,
     /// Hashes of trusted root certificates for fast lookup
     trusted_root_hashes: HashSet<[u8; 32]>,
+    /// Cache for DER to X509 conversions
+    x509_cache: Cache<[u8; 32], Arc<openssl::x509::X509>>,
 }
 
 /// Context for chain validation that captures the chain type and issuer information
@@ -111,10 +116,16 @@ impl Rfc6962Validator {
             .map(Self::certificate_hash)
             .collect::<Result<HashSet<_>>>()?;
 
+        let x509_cache = Cache::builder()
+            .max_capacity(10_000)
+            .time_to_live(std::time::Duration::from_secs(3600))
+            .build();
+
         Ok(Self {
             config,
             trusted_roots,
             trusted_root_hashes,
+            x509_cache,
         })
     }
 
@@ -175,13 +186,13 @@ impl Rfc6962Validator {
     }
 
     /// Validate a certificate chain according to RFC 6962
-    pub fn validate_chain(&self, chain: &[Vec<u8>]) -> Result<()> {
+    pub async fn validate_chain(&self, chain: &[Vec<u8>]) -> Result<()> {
         let context = self.analyze_chain(chain)?;
-        self.validate_chain_with_context(&context)
+        self.validate_chain_with_context(&context).await
     }
 
     /// Validate a chain using the analyzed context
-    fn validate_chain_with_context(&self, context: &ChainValidationContext) -> Result<()> {
+    async fn validate_chain_with_context(&self, context: &ChainValidationContext) -> Result<()> {
         for (i, cert) in context.parsed_chain.iter().enumerate() {
             self.validate_certificate_basic(cert, i)?;
         }
@@ -194,8 +205,8 @@ impl Rfc6962Validator {
             self.verify_precert_signing_cert(signing_cert, real_issuer)?;
         }
 
-        self.verify_chain_to_root(&context.parsed_chain)?;
-        self.verify_chain_signatures(&context.parsed_chain)?;
+        self.verify_chain_to_root(&context.parsed_chain).await?;
+        self.verify_chain_signatures(&context.parsed_chain).await?;
 
         Ok(())
     }
@@ -325,10 +336,31 @@ impl Rfc6962Validator {
         Ok(())
     }
 
-    /// Verify the chain terminates in a trusted root
-    fn verify_chain_to_root(&self, chain: &[Certificate]) -> Result<()> {
-        use openssl::x509::X509;
+    /// Convert a certificate to X509
+    async fn cert_to_x509(&self, cert: &Certificate) -> Result<Arc<openssl::x509::X509>> {
+        let cert_der = cert
+            .to_der()
+            .map_err(|e| CtError::Internal(format!("Failed to encode certificate: {}", e)))?;
 
+        let mut hasher = Sha256::new();
+        hasher.update(&cert_der);
+        let der_hash: [u8; 32] = hasher.finalize().into();
+
+        if let Some(cached) = self.x509_cache.get(&der_hash).await {
+            return Ok(cached);
+        }
+
+        let x509 = X509::from_der(&cert_der)
+            .map_err(|e| CtError::Internal(format!("Failed to parse certificate: {}", e)))?;
+        let x509_arc = Arc::new(x509);
+
+        self.x509_cache.insert(der_hash, x509_arc.clone()).await;
+
+        Ok(x509_arc)
+    }
+
+    /// Verify the chain terminates in a trusted root
+    async fn verify_chain_to_root(&self, chain: &[Certificate]) -> Result<()> {
         if self.trusted_roots.is_empty() {
             return Err(CtError::BadRequest(
                 "No trusted roots configured".to_string(),
@@ -363,6 +395,11 @@ impl Rfc6962Validator {
             last_cert.tbs_certificate.issuer
         );
 
+        let mut chain_x509s = Vec::with_capacity(chain.len());
+        for cert in chain {
+            chain_x509s.push(self.cert_to_x509(cert).await?);
+        }
+
         // Check if any certificate in the chain is issued by a trusted root
         for (idx, cert) in chain.iter().enumerate() {
             let cert_subject = &cert.tbs_certificate.subject;
@@ -375,7 +412,9 @@ impl Rfc6962Validator {
                 cert_issuer
             );
 
+            let cert_x509 = &chain_x509s[idx];
             let mut matched_issuers = 0;
+
             for root in &self.trusted_roots {
                 if cert.tbs_certificate.issuer == root.tbs_certificate.subject {
                     matched_issuers += 1;
@@ -384,23 +423,7 @@ impl Rfc6962Validator {
                         root.tbs_certificate.subject
                     );
 
-                    // Verify the certificate is actually signed by this root
-                    let cert_der = cert.to_der().map_err(|e| {
-                        CtError::Internal(format!("Failed to encode certificate: {}", e))
-                    })?;
-                    let cert_x509 = X509::from_der(&cert_der).map_err(|e| {
-                        CtError::Internal(format!(
-                            "Failed to parse certificate for verification: {}",
-                            e
-                        ))
-                    })?;
-
-                    let root_der = root.to_der().map_err(|e| {
-                        CtError::Internal(format!("Failed to encode root certificate: {}", e))
-                    })?;
-                    let root_x509 = X509::from_der(&root_der).map_err(|e| {
-                        CtError::Internal(format!("Failed to parse root certificate: {}", e))
-                    })?;
+                    let root_x509 = self.cert_to_x509(root).await?;
 
                     let root_pubkey = root_x509.public_key().map_err(|e| {
                         CtError::Internal(format!("Failed to extract root public key: {}", e))
@@ -455,27 +478,14 @@ impl Rfc6962Validator {
     }
 
     /// Verify signatures in the certificate chain
-    fn verify_chain_signatures(&self, chain: &[Certificate]) -> Result<()> {
-        use openssl::x509::X509;
-
+    async fn verify_chain_signatures(&self, chain: &[Certificate]) -> Result<()> {
         if chain.is_empty() {
             return Ok(());
         }
 
-        let mut x509_chain: Vec<X509> = Vec::new();
-        for (i, cert) in chain.iter().enumerate() {
-            let cert_der = cert.to_der().map_err(|e| {
-                CtError::Internal(format!(
-                    "Failed to encode certificate at index {}: {}",
-                    i, e
-                ))
-            })?;
-
-            let x509 = X509::from_der(&cert_der).map_err(|e| {
-                CtError::Internal(format!("Failed to parse certificate at index {}: {}", i, e))
-            })?;
-
-            x509_chain.push(x509);
+        let mut x509_chain = Vec::with_capacity(chain.len());
+        for cert in chain {
+            x509_chain.push(self.cert_to_x509(cert).await?);
         }
 
         // We just verify signatures directly without full chain validation
@@ -752,8 +762,8 @@ mod tests {
         Rfc6962Validator::with_trusted_roots(config, trusted_roots)
     }
 
-    #[test]
-    fn test_validate_simple_certificate_chain() {
+    #[tokio::test]
+    async fn test_validate_simple_certificate_chain() {
         use p256::ecdsa::SigningKey;
 
         let temp_dir = TempDir::new().unwrap();
@@ -821,7 +831,7 @@ mod tests {
         );
 
         let chain = vec![ee_cert, root_cert];
-        let result = validator.validate_chain(&chain);
+        let result = validator.validate_chain(&chain).await;
 
         if let Err(e) = &result {
             println!("Validation error: {}", e);
@@ -833,8 +843,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_validate_precertificate_chain() {
+    #[tokio::test]
+    async fn test_validate_precertificate_chain() {
         use p256::ecdsa::SigningKey;
 
         let temp_dir = TempDir::new().unwrap();
@@ -884,7 +894,7 @@ mod tests {
         let validator = create_test_validator(config).unwrap();
 
         let chain = vec![precert, root_cert];
-        let result = validator.validate_chain(&chain);
+        let result = validator.validate_chain(&chain).await;
 
         if let Err(e) = &result {
             println!("Validation error: {}", e);
@@ -961,8 +971,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_verify_chain_to_root_signature() {
+    #[tokio::test]
+    async fn test_verify_chain_to_root_signature() {
         use p256::ecdsa::SigningKey;
 
         let temp_dir = TempDir::new().unwrap();
@@ -1018,7 +1028,7 @@ mod tests {
 
         // Test 1: Malicious chain should fail
         let malicious_chain = vec![malicious_ee_cert];
-        let result = validator.validate_chain(&malicious_chain);
+        let result = validator.validate_chain(&malicious_chain).await;
         assert!(
             result.is_err(),
             "Malicious certificate claiming false issuer should fail validation"
@@ -1035,15 +1045,15 @@ mod tests {
         );
 
         let valid_chain = vec![valid_ee_cert];
-        let result = validator.validate_chain(&valid_chain);
+        let result = validator.validate_chain(&valid_chain).await;
         assert!(
             result.is_ok(),
             "Valid certificate signed by trusted root should pass validation"
         );
     }
 
-    #[test]
-    fn test_verify_chain_with_intermediate() {
+    #[tokio::test]
+    async fn test_verify_chain_with_intermediate() {
         use p256::ecdsa::SigningKey;
 
         let temp_dir = TempDir::new().unwrap();
@@ -1106,7 +1116,7 @@ mod tests {
 
         // Test 1: Chain without root should succeed (intermediate chains to trusted root)
         let chain_without_root = vec![ee_cert.clone(), intermediate_cert.clone()];
-        let result = validator.validate_chain(&chain_without_root);
+        let result = validator.validate_chain(&chain_without_root).await;
         assert!(
             result.is_ok(),
             "Chain with intermediate signed by trusted root should pass: {:?}",
@@ -1119,7 +1129,7 @@ mod tests {
             intermediate_cert.clone(),
             root_cert.clone(),
         ];
-        let result = validator.validate_chain(&chain_with_root);
+        let result = validator.validate_chain(&chain_with_root).await;
         assert!(
             result.is_ok(),
             "Chain including the trusted root should pass: {:?}",
@@ -1128,15 +1138,15 @@ mod tests {
 
         // Test 3: Incomplete chain (missing intermediate) should fail
         let incomplete_chain = vec![ee_cert.clone()];
-        let result = validator.validate_chain(&incomplete_chain);
+        let result = validator.validate_chain(&incomplete_chain).await;
         assert!(
             result.is_err(),
             "Incomplete chain missing intermediate should fail"
         );
     }
 
-    #[test]
-    fn test_chain_termination_attack() {
+    #[tokio::test]
+    async fn test_chain_termination_attack() {
         use p256::ecdsa::SigningKey;
 
         // This test demonstrates a vulnerability where an attacker can append
@@ -1219,14 +1229,16 @@ mod tests {
             valid_intermediate.clone(),
             attacker_root,
         ];
-        let result = validator.validate_chain(&attack_chain_with_fake_root);
+        let result = validator.validate_chain(&attack_chain_with_fake_root).await;
         assert!(result.is_err(), "Attack chain with fake root should fail");
 
         // Test 2: What if attacker just omits their fake root?
         // Chain: [Attacker EE] -> [Valid Intermediate]
         // The intermediate IS signed by a trusted root, but the EE is signed by intermediate
         let attack_chain_without_fake_root = vec![attacker_ee, valid_intermediate];
-        let result2 = validator.validate_chain(&attack_chain_without_fake_root);
+        let result2 = validator
+            .validate_chain(&attack_chain_without_fake_root)
+            .await;
 
         // This should succeed because it's a valid chain to a trusted root
         assert!(
@@ -1235,8 +1247,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_disconnected_chain_vulnerability() {
+    #[tokio::test]
+    async fn test_disconnected_chain_vulnerability() {
         use p256::ecdsa::SigningKey;
 
         // Test for a disconnected chain where a trusted root is present
@@ -1306,13 +1318,13 @@ mod tests {
         // But Attacker CA is NOT signed by Trusted Root!
         let disconnected_chain = vec![attacker_ee, attacker_ca, trusted_root.clone()];
 
-        let result = validator.validate_chain(&disconnected_chain);
+        let result = validator.validate_chain(&disconnected_chain).await;
 
         assert!(result.is_err(), "Disconnected chain should fail validation");
     }
 
-    #[test]
-    fn test_temporal_window_validation() {
+    #[tokio::test]
+    async fn test_temporal_window_validation() {
         use p256::ecdsa::SigningKey;
 
         let temp_dir = TempDir::new().unwrap();
@@ -1368,7 +1380,7 @@ mod tests {
 
         // Test 1: Certificate within the temporal window (should pass)
         let chain = vec![ee_cert, root_cert];
-        let result = validator.validate_chain(&chain);
+        let result = validator.validate_chain(&chain).await;
         assert!(
             result.is_ok(),
             "Certificate within temporal window should pass: {:?}",
@@ -1388,7 +1400,7 @@ mod tests {
         };
 
         let validator_restrictive = create_test_validator(config_restrictive).unwrap();
-        let result = validator_restrictive.validate_chain(&chain);
+        let result = validator_restrictive.validate_chain(&chain).await;
         assert!(
             result.is_err(),
             "Certificate outside temporal window should fail"

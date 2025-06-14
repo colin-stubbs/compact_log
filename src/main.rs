@@ -169,10 +169,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("CT storage created");
 
     // Initialize validation if configured
-    let validator = if let Some(validation_config) = &config.validation {
+    let (validator, validation_context) = if let Some(validation_config) = &config.validation {
         if !validation_config.enabled {
             info!("Validation is disabled in configuration");
-            None
+            (None, None)
         } else {
             // Parse the CCADB environment
             let ccadb_env = match validation_config.ccadb.to_lowercase().as_str() {
@@ -231,40 +231,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 root_store.count().await
             );
 
-            // Start the CCADB worker to fetch and update certificates
-            let ccadb_worker = CcadbWorker::new(
-                rfc6962_config.ccadb,
-                root_store.clone(),
-                rfc6962_config.trusted_roots_dir.clone(),
-            );
-
-            // Spawn the worker to run periodically (every hour)
-            let _worker_handle = tokio::spawn(async move {
-                // Do an initial update
-                if let Err(e) = ccadb_worker.update().await {
-                    tracing::error!("Initial CCADB update failed: {}", e);
-                }
-
-                // Then run periodically
-                ccadb_worker.run_periodic(Duration::from_secs(3600)).await;
-            });
-
             // Create validator with the shared root store
             let trusted_roots = root_store.get_all_certificates().await;
-            let validator = Arc::new(Rfc6962Validator::with_trusted_roots(
-                rfc6962_config,
-                trusted_roots,
-            )?);
+            let validator =
+                Rfc6962Validator::with_trusted_roots(rfc6962_config.clone(), trusted_roots)?;
             info!(
                 "RFC 6962 validator initialized with {} trusted roots",
                 root_store.count().await
             );
 
-            Some(validator)
+            (Some(validator), Some((root_store, rfc6962_config)))
         }
     } else {
         info!("No validation configured, running without certificate validation");
-        None
+        (None, None)
     };
 
     let private_key_bytes = private_key.to_bytes().to_vec();
@@ -277,6 +257,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.server.base_url.clone(),
         validator,
     )?;
+
+    // Start the CCADB worker if validation is enabled
+    if let (Some(validator_lock), Some((root_store, rfc6962_config))) =
+        (&api_state.validator, validation_context)
+    {
+        let ccadb_worker = CcadbWorker::new(
+            rfc6962_config.ccadb,
+            root_store,
+            rfc6962_config.trusted_roots_dir.clone(),
+        )
+        .with_validator(validator_lock.clone(), rfc6962_config);
+
+        tokio::spawn(async move {
+            // Do an initial update
+            if let Err(e) = ccadb_worker.update().await {
+                tracing::error!("Initial CCADB update failed: {}", e);
+            }
+
+            ccadb_worker.run_periodic(Duration::from_secs(3600)).await;
+        });
+    }
 
     let app = create_router(api_state);
 
