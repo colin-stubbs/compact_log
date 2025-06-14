@@ -2597,8 +2597,12 @@ mod tests {
             let proof = tree.prove_inclusion_at_size(i, 7).await.unwrap();
             proof
                 .verify(&leaves[i as usize], i, &root7)
-                .unwrap_or_else(|_| panic!("Inclusion proof for leaf {} in tree of size 7 should verify",
-                    i));
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "Inclusion proof for leaf {} in tree of size 7 should verify",
+                        i
+                    )
+                });
         }
 
         // Also test with size 5 (another non-power of 2)
@@ -2617,8 +2621,12 @@ mod tests {
             let proof = tree2.prove_inclusion_at_size(i, 5).await.unwrap();
             proof
                 .verify(&leaves5[i as usize], i, &root5)
-                .unwrap_or_else(|_| panic!("Inclusion proof for leaf {} in tree of size 5 should verify",
-                    i));
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "Inclusion proof for leaf {} in tree of size 5 should verify",
+                        i
+                    )
+                });
         }
     }
 

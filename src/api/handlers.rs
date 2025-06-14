@@ -258,14 +258,17 @@ pub async fn add_pre_chain(
 
     if let Some(validator_lock) = &state.validator {
         let validator = validator_lock.read().await;
-        validator.validate_chain(&complete_chain).await.map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Certificate validation failed: {}", e),
-                }),
-            )
-        })?;
+        validator
+            .validate_chain(&complete_chain)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Certificate validation failed: {}", e),
+                    }),
+                )
+            })?;
     }
 
     let issuer_key_hash = if let Some(validator_lock) = &state.validator {
@@ -652,9 +655,7 @@ pub async fn get_entry_and_proof(
             )
         })?;
 
-    let chain_data = log_entry
-        .chain.clone()
-        .unwrap_or_default();
+    let chain_data = log_entry.chain.clone().unwrap_or_default();
 
     let leaf_input = log_entry
         .serialize()
