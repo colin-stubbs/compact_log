@@ -28,6 +28,7 @@ mod api;
 mod ccadb;
 mod merkle_storage;
 mod merkle_tree;
+mod metrics;
 mod oids;
 mod storage;
 mod types;
@@ -131,6 +132,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     info!("Starting Certificate Transparency Log");
+
+    metrics::init_metrics();
 
     let config = load_config().await?;
 

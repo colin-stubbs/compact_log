@@ -82,7 +82,8 @@ impl StorageBackedMerkleTree {
             .into_iter()
             .map(|data| Certificate { data })
             .collect();
-        self.tree
+        let result = self
+            .tree
             .batch_push_with_data(certificates, additional_data)
             .await
             .map_err(|e| {
@@ -90,7 +91,13 @@ impl StorageBackedMerkleTree {
                     "Failed to batch push with data: {:?}",
                     e
                 )))
-            })
+            })?;
+
+        if let Ok(size) = self.size().await {
+            crate::metrics::MERKLE_TREE_SIZE.set(size as i64);
+        }
+
+        Ok(result)
     }
 
     /// Get the root at the committed tree size (for STH generation)

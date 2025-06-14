@@ -1,3 +1,4 @@
+use crate::types::{LogEntry, LogEntryType};
 use crate::{
     api::{ApiState, ErrorResponse},
     merkle_storage::serialization,
@@ -17,6 +18,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Instant;
 use x509_cert::der::Decode;
 
 type ApiResult<T> = std::result::Result<Json<T>, (StatusCode, Json<ErrorResponse>)>;
@@ -25,10 +27,12 @@ pub async fn add_chain(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<AddChainRequest>,
 ) -> ApiResult<AddChainResponse> {
-    use crate::types::{LogEntry, LogEntryType};
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let validation_start = Instant::now();
 
     if request.chain.is_empty() {
+        crate::metrics::CERTIFICATE_SUBMISSIONS_TOTAL
+            .with_label_values(&["x509", "failed"])
+            .inc();
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -36,6 +40,10 @@ pub async fn add_chain(
             }),
         ));
     }
+
+    crate::metrics::CERTIFICATE_CHAIN_LENGTH
+        .with_label_values(&["x509"])
+        .observe(request.chain.len() as f64);
 
     let chain: std::result::Result<Vec<Vec<u8>>, _> = request
         .chain
@@ -65,10 +73,12 @@ pub async fn add_chain(
         )
     })?;
 
-    // Validate certificate chain
     if let Some(validator_lock) = &state.validator {
         let validator = validator_lock.read().await;
         validator.validate_chain(&chain).await.map_err(|e| {
+            crate::metrics::CERTIFICATE_SUBMISSIONS_TOTAL
+                .with_label_values(&["x509", "validation_failed"])
+                .inc();
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
@@ -76,6 +86,10 @@ pub async fn add_chain(
                 }),
             )
         })?;
+
+        crate::metrics::VALIDATION_DURATION_SECONDS
+            .with_label_values(&["x509"])
+            .observe(validation_start.elapsed().as_secs_f64());
     }
 
     use sha2::{Digest, Sha256};
@@ -89,6 +103,9 @@ pub async fn add_chain(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?
     {
+        crate::metrics::CERTIFICATE_SUBMISSIONS_TOTAL
+            .with_label_values(&["x509", "deduplicated"])
+            .inc();
         let response = AddChainResponse {
             sct_version: existing_sct_entry.sct.version as u8,
             id: STANDARD.encode(existing_sct_entry.sct.log_id.as_bytes()),
@@ -171,6 +188,10 @@ pub async fn add_chain(
             ),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())),
         })?;
+
+    crate::metrics::CERTIFICATE_SUBMISSIONS_TOTAL
+        .with_label_values(&["x509", "success"])
+        .inc();
 
     let response = AddChainResponse {
         sct_version: sct.version as u8,
@@ -468,6 +489,9 @@ pub async fn get_entries(
     Query(params): Query<GetEntriesRequest>,
 ) -> ApiResult<GetEntriesResponse> {
     if params.start > params.end {
+        crate::metrics::GET_ENTRIES_REQUESTS
+            .with_label_values(&["failed"])
+            .inc();
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -480,6 +504,10 @@ pub async fn get_entries(
 
     let count = (params.end - params.start + 1).min(MAX_ENTRIES);
     let end = params.start + count - 1;
+
+    crate::metrics::GET_ENTRIES_BATCH_SIZE
+        .with_label_values(&[])
+        .observe(count as f64);
 
     let storage = state.storage.clone();
     let futures: Vec<_> = (params.start..=end)
@@ -594,6 +622,10 @@ pub async fn get_entries(
             entries.push(leaf_entry);
         }
     }
+
+    crate::metrics::GET_ENTRIES_REQUESTS
+        .with_label_values(&["success"])
+        .inc();
 
     Ok(Json(GetEntriesResponse { entries }))
 }

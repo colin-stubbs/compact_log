@@ -1,8 +1,10 @@
 use axum::{
-    response::Json,
+    middleware,
+    response::{Json, Response},
     routing::{get, post},
     Router,
 };
+use prometheus::{Encoder, TextEncoder};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -78,6 +80,9 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/inclusion_request.json", get(handlers::inclusion_request))
         // Health check
         .route("/health", get(health_check))
+        // Prometheus metrics endpoint
+        .route("/metrics", get(metrics_handler))
+        .layer(middleware::from_fn(metrics_middleware))
         .with_state(Arc::new(state))
 }
 
@@ -113,4 +118,57 @@ impl From<crate::storage::StorageError> for ErrorResponse {
             error: format!("Storage error: {}", err),
         }
     }
+}
+
+async fn metrics_handler() -> Result<String, (axum::http::StatusCode, String)> {
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
+    let mut buffer = Vec::new();
+    encoder.encode(&metric_families, &mut buffer).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to encode metrics: {}", e),
+        )
+    })?;
+    String::from_utf8(buffer).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to convert metrics to string: {}", e),
+        )
+    })
+}
+
+use crate::metrics;
+use axum::{body::Body, extract::Request};
+use std::time::Instant;
+
+async fn metrics_middleware(
+    req: Request<Body>,
+    next: axum::middleware::Next,
+) -> Result<Response, axum::response::Response> {
+    let start = Instant::now();
+    let path = req.uri().path().to_string();
+    let method = req.method().to_string();
+
+    metrics::ACTIVE_CONNECTIONS.inc();
+
+    let response = next.run(req).await;
+
+    let duration = start.elapsed().as_secs_f64();
+    let status = response.status().as_u16().to_string();
+
+    // Only track CT API endpoints, not health or metrics
+    if path.starts_with("/ct/v1/") {
+        metrics::HTTP_REQUEST_DURATION_SECONDS
+            .with_label_values(&[&path, &method])
+            .observe(duration);
+
+        metrics::HTTP_REQUESTS_TOTAL
+            .with_label_values(&[&path, &method, &status])
+            .inc();
+    }
+
+    metrics::ACTIVE_CONNECTIONS.dec();
+
+    Ok(response)
 }

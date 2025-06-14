@@ -547,7 +547,7 @@ impl CtStorage {
                     }
                 }
             }
-            Err(e) => {
+            Err(ref e) => {
                 for (i, entry) in entries.drain(..).enumerate() {
                     if let Some((_, error)) = failed_entries.iter().find(|(idx, _)| *idx == i) {
                         let _ = entry.completion_tx.send(Err(error.clone()));
@@ -565,6 +565,41 @@ impl CtStorage {
 
         // Record batch statistics
         let flush_time_ms = start_time.elapsed().as_millis() as u64;
+        let flush_time_secs = start_time.elapsed().as_secs_f64();
+
+        match &push_result {
+            Ok(_) => {
+                crate::metrics::STORAGE_BATCHES_FLUSHED
+                    .with_label_values(&["success"])
+                    .inc();
+                crate::metrics::STORAGE_FLUSH_DURATION_SECONDS
+                    .with_label_values(&["success"])
+                    .observe(flush_time_secs);
+            }
+            Err(_) => {
+                crate::metrics::STORAGE_BATCHES_FLUSHED
+                    .with_label_values(&["failed"])
+                    .inc();
+                crate::metrics::STORAGE_FLUSH_DURATION_SECONDS
+                    .with_label_values(&["failed"])
+                    .observe(flush_time_secs);
+            }
+        }
+
+        crate::metrics::STORAGE_ENTRIES_PROCESSED
+            .with_label_values(&["total"])
+            .inc_by(batch_size as u64);
+
+        // Update deduplication metrics
+        if total_certs_in_batch > 0 {
+            crate::metrics::DEDUPLICATED_CERTIFICATES
+                .with_label_values(&["checked"])
+                .inc_by(total_certs_in_batch as u64);
+            crate::metrics::DEDUPLICATED_CERTIFICATES
+                .with_label_values(&["skipped"])
+                .inc_by(total_certs_skipped as u64);
+        }
+
         let mut stats = batch_stats.lock().await;
         stats.batches_flushed += 1;
         stats.total_entries += batch_size as u64;
@@ -805,6 +840,9 @@ impl CtStorage {
             let current_depth = max_capacity - capacity;
             let utilization_percent = (current_depth as f64 / max_capacity as f64) * 100.0;
 
+            crate::metrics::STORAGE_QUEUE_DEPTH.set(current_depth as i64);
+            crate::metrics::STORAGE_QUEUE_CAPACITY.set(max_capacity as i64);
+
             // Get batch statistics
             let stats = batch_stats.lock().await;
             let interval_batches = stats
@@ -876,14 +914,23 @@ impl CtStorage {
             };
             drop(stats);
 
-            // Still warn about queue depth
             if utilization_percent > 90.0 {
+                crate::metrics::HEALTH_CHECK_STATUS
+                    .with_label_values(&["storage_queue"])
+                    .set(0.0);
                 tracing::warn!(
                     "Queue utilization critical: {}%",
                     utilization_percent as u32
                 );
             } else if utilization_percent > 75.0 {
+                crate::metrics::HEALTH_CHECK_STATUS
+                    .with_label_values(&["storage_queue"])
+                    .set(0.5);
                 tracing::warn!("Queue utilization high: {}%", utilization_percent as u32);
+            } else {
+                crate::metrics::HEALTH_CHECK_STATUS
+                    .with_label_values(&["storage_queue"])
+                    .set(1.0);
             }
         }
     }
