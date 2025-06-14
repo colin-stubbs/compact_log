@@ -415,6 +415,7 @@ async fn initialize_storage(
     });
 
     let compactor_options: CompactorOptions = CompactorOptions {
+        max_sst_size: 128 * 1024 * 1024, // 128 MB
         poll_interval: Duration::from_millis(100),
         max_concurrent_compactions: num_cpus::get(),
         ..default::Default::default()
