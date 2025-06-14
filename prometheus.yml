@@ -1,0 +1,6 @@
+scrape_configs:
+  - job_name: 'CompactLog'
+    static_configs:
+      - targets: ['localhost:8888'] # CompactLog server address
+    metrics_path: '/metrics'
+    scrape_interval: 1s 
