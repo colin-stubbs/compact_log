@@ -405,7 +405,7 @@ async fn initialize_storage(
     let block_cache = Arc::new(MokaCache::new_with_opts(cache_options));
 
     let garbage_collector_directory_options = GarbageCollectorDirectoryOptions {
-        min_age: Duration::from_secs(30 * 60),
+        min_age: Duration::from_secs(30 * 60 * 12),
         ..default::Default::default()
     };
 
@@ -420,7 +420,6 @@ async fn initialize_storage(
 
     let compactor_options: CompactorOptions = CompactorOptions {
         max_sst_size: 128 * 1024 * 1024, // 128 MB
-        poll_interval: Duration::from_millis(100),
         max_concurrent_compactions: num_cpus::get(),
         ..default::Default::default()
     };
