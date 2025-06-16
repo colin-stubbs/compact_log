@@ -211,6 +211,20 @@ impl Rfc6962Validator {
         Ok(())
     }
 
+    /// Check if a certificate is a CA certificate (has Basic Constraints with CA:TRUE)
+    fn is_ca_certificate(&self, cert: &Certificate) -> bool {
+        if let Some(extensions) = &cert.tbs_certificate.extensions {
+            for ext in extensions.iter() {
+                if ext.extn_id == BASIC_CONSTRAINTS_OID {
+                    if let Ok(bc) = BasicConstraints::from_der(ext.extn_value.as_bytes()) {
+                        return bc.ca;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Check if a certificate is a precertificate
     fn is_precertificate(&self, cert: &Certificate) -> Result<bool> {
         if let Some(extensions) = &cert.tbs_certificate.extensions {
@@ -354,7 +368,11 @@ impl Rfc6962Validator {
             .map_err(|e| CtError::Internal(format!("Failed to parse certificate: {}", e)))?;
         let x509_arc = Arc::new(x509);
 
-        self.x509_cache.insert(der_hash, x509_arc.clone()).await;
+        // Only cache CA certificates (intermediates and roots)
+        let is_ca = self.is_ca_certificate(cert);
+        if is_ca {
+            self.x509_cache.insert(der_hash, x509_arc.clone()).await;
+        }
 
         Ok(x509_arc)
     }
@@ -943,6 +961,78 @@ mod tests {
         assert!(result.is_ok(), "Should be able to extract issuer key hash");
         let hash = result.unwrap();
         assert_eq!(hash.len(), 32, "Issuer key hash should be 32 bytes");
+    }
+
+    #[test]
+    fn test_is_ca_certificate() {
+        let temp_dir = TempDir::new().unwrap();
+        let roots_dir = temp_dir.path().join("roots");
+        fs::create_dir(&roots_dir).unwrap();
+
+        // Create a CA certificate
+        let ca_cert_der = create_test_certificate(
+            "CN=Test CA,O=Test Org",
+            "CN=Test CA,O=Test Org",
+            true, // is_ca = true
+            vec![],
+        );
+        let ca_cert = Certificate::from_der(&ca_cert_der).unwrap();
+
+        // Create an end-entity certificate
+        let ee_cert_der = create_test_certificate(
+            "CN=example.com",
+            "CN=Test CA,O=Test Org",
+            false, // is_ca = false
+            vec![],
+        );
+        let ee_cert = Certificate::from_der(&ee_cert_der).unwrap();
+
+        // Create a precert signing certificate (has CA:TRUE and CT EKU)
+        let bc_value = BASIC_CONSTRAINTS_CA_TRUE.to_vec();
+        let bc_ext = Extension {
+            extn_id: BASIC_CONSTRAINTS_OID,
+            critical: true,
+            extn_value: OctetString::new(bc_value).unwrap(),
+        };
+        
+        let eku_value = ExtendedKeyUsage(vec![CT_EKU_OID]).to_der().unwrap();
+        let eku_ext = Extension {
+            extn_id: EXTENDED_KEY_USAGE_OID,
+            critical: true,
+            extn_value: OctetString::new(eku_value).unwrap(),
+        };
+        
+        let precert_signing_cert_der = create_test_certificate(
+            "CN=Precert Signing Cert",
+            "CN=Test CA,O=Test Org",
+            false, // Let extensions handle CA status
+            vec![bc_ext, eku_ext],
+        );
+        let precert_signing_cert = Certificate::from_der(&precert_signing_cert_der).unwrap();
+
+        let config = Rfc6962ValidationConfig {
+            trusted_roots_dir: roots_dir,
+            ..Default::default()
+        };
+        let validator = create_test_validator(config).unwrap();
+
+        // Test CA certificate
+        assert!(
+            validator.is_ca_certificate(&ca_cert),
+            "CA certificate should be identified as CA"
+        );
+
+        // Test end-entity certificate
+        assert!(
+            !validator.is_ca_certificate(&ee_cert),
+            "End-entity certificate should not be identified as CA"
+        );
+
+        // Test precert signing certificate (has CA:TRUE)
+        assert!(
+            validator.is_ca_certificate(&precert_signing_cert),
+            "Precert signing certificate should be identified as CA"
+        );
     }
 
     #[test]
