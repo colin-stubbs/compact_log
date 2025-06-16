@@ -419,7 +419,7 @@ async fn initialize_storage(
     });
 
     let compactor_options: CompactorOptions = CompactorOptions {
-        max_concurrent_compactions: num_cpus::get(),
+        max_concurrent_compactions: num_cpus::get_physical(),
         ..default::Default::default()
     };
 
