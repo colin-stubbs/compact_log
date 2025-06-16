@@ -1,4 +1,5 @@
 use config::Config;
+use der::oid::db;
 use p256::pkcs8::LineEnding;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use p256::SecretKey;
@@ -410,6 +411,8 @@ async fn initialize_storage(
     };
 
     let mut db_options = Settings::default();
+    db_options.l0_max_ssts = 8;
+    db_options.l0_sst_size_bytes = 128 * 1024 * 1024;
     db_options.compression_codec = Some(CompressionCodec::Lz4);
     db_options.garbage_collector_options = Some(GarbageCollectorOptions {
         wal_options: Some(garbage_collector_directory_options),
