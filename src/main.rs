@@ -122,10 +122,12 @@ fn default_memory_block_cache_capacity_mb() -> u64 {
     DEFAULT_MEMORY_BLOCK_CACHE_CAPACITY_MB
 }
 
-use mimalloc::MiMalloc;
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
 
+#[cfg(not(target_env = "msvc"))]
 #[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+static GLOBAL: Jemalloc = Jemalloc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
