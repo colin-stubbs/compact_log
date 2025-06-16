@@ -994,14 +994,14 @@ mod tests {
             critical: true,
             extn_value: OctetString::new(bc_value).unwrap(),
         };
-        
+
         let eku_value = ExtendedKeyUsage(vec![CT_EKU_OID]).to_der().unwrap();
         let eku_ext = Extension {
             extn_id: EXTENDED_KEY_USAGE_OID,
             critical: true,
             extn_value: OctetString::new(eku_value).unwrap(),
         };
-        
+
         let precert_signing_cert_der = create_test_certificate(
             "CN=Precert Signing Cert",
             "CN=Test CA,O=Test Org",

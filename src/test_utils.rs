@@ -1,5 +1,5 @@
 #[cfg(test)]
-pub mod test_utils {
+pub mod utils {
     use crate::oids::*;
     use der::asn1::{BitString, OctetString, SetOfVec};
     use der::{Decode, Encode};

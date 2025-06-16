@@ -170,7 +170,7 @@ impl RootCertificateStore {
             };
 
             match pem_rfc7468::decode_vec(cleaned_pem.as_bytes()) {
-                Ok((label, der_bytes)) if label == "CERTIFICATE" => {
+                Ok(("CERTIFICATE", der_bytes)) => {
                     match Certificate::from_der(&der_bytes) {
                         Ok(cert) => {
                             let mut hasher = Sha256::new();

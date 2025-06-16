@@ -287,6 +287,8 @@ impl CtStorage {
         tracing::trace!("flush_batch: Flushing {} entries", batch_size);
 
         let mut leaf_data_vec = Vec::new();
+
+        #[allow(clippy::type_complexity)]
         let mut entry_metadata: Vec<(
             usize,
             Vec<u8>,
@@ -955,14 +957,13 @@ mod tests {
     }
 
     fn create_test_precert_entry() -> (LogEntry, [u8; 32]) {
-        let original_precert_der =
-            crate::test_utils::test_utils::create_precertificate_with_poison();
-        let issuer_cert_der = crate::test_utils::test_utils::create_test_certificate();
+        let original_precert_der = crate::test_utils::utils::create_precertificate_with_poison();
+        let issuer_cert_der = crate::test_utils::utils::create_test_certificate();
         // For precertificates, the chain includes [precert, issuer]
         let full_chain = vec![original_precert_der.clone(), issuer_cert_der.clone()];
 
         let issuer_key_hash: Vec<u8> =
-            crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain);
+            crate::test_utils::utils::extract_test_issuer_key_hash(&full_chain);
 
         let tbs_certificate =
             TbsExtractor::extract_tbs_certificate(&original_precert_der, &full_chain).unwrap();
@@ -1594,21 +1595,18 @@ mod tests {
 
         let log_id = create_test_log_id();
 
-        let issuer_cert = crate::test_utils::test_utils::create_test_certificate();
+        let issuer_cert = crate::test_utils::utils::create_test_certificate();
 
-        let precert1 = crate::test_utils::test_utils::create_precertificate_with_poison();
-        let precert2 =
-            crate::test_utils::test_utils::create_precertificate_with_poison_and_serial(3); // Different precert
+        let precert1 = crate::test_utils::utils::create_precertificate_with_poison();
+        let precert2 = crate::test_utils::utils::create_precertificate_with_poison_and_serial(3); // Different precert
 
         let full_chain = vec![precert1.clone(), issuer_cert.clone()];
-        let issuer_key_hash1 =
-            crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain);
+        let issuer_key_hash1 = crate::test_utils::utils::extract_test_issuer_key_hash(&full_chain);
         let tbs1 =
             TbsExtractor::extract_tbs_certificate(&precert1, &[issuer_cert.clone()]).unwrap();
 
         let full_chain2 = vec![precert2.clone(), issuer_cert.clone()];
-        let issuer_key_hash2 =
-            crate::test_utils::test_utils::extract_test_issuer_key_hash(&full_chain2);
+        let issuer_key_hash2 = crate::test_utils::utils::extract_test_issuer_key_hash(&full_chain2);
         let tbs2 =
             TbsExtractor::extract_tbs_certificate(&precert2, &[issuer_cert.clone()]).unwrap();
 

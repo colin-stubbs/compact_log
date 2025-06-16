@@ -4,7 +4,7 @@ use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use p256::SecretKey;
 use serde::{Deserialize, Serialize};
 use slatedb::config::{
-    CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
     ObjectStoreCacheOptions,
 };
 use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
@@ -401,8 +401,10 @@ async fn initialize_storage(
         .map(|c| c.memory_block_cache_capacity_mb)
         .unwrap_or(DEFAULT_MEMORY_BLOCK_CACHE_CAPACITY_MB);
 
-    let mut cache_options = MokaCacheOptions::default();
-    cache_options.max_capacity = memory_block_cache_mb * 1024 * 1024; // Convert MB to bytes
+    let cache_options = MokaCacheOptions {
+        max_capacity: memory_block_cache_mb * 1024 * 1024, // Convert MB to bytes
+        ..default::Default::default()
+    };
 
     let block_cache = Arc::new(MokaCache::new_with_opts(cache_options));
 
@@ -411,38 +413,32 @@ async fn initialize_storage(
         ..default::Default::default()
     };
 
-    let mut db_options = Settings::default();
-    db_options.compression_codec = Some(CompressionCodec::Lz4);
-    db_options.garbage_collector_options = Some(GarbageCollectorOptions {
-        wal_options: Some(garbage_collector_directory_options),
-        manifest_options: Some(garbage_collector_directory_options),
-        compacted_options: Some(garbage_collector_directory_options),
-        ..default::Default::default()
-    });
-
-    let compactor_options: CompactorOptions = CompactorOptions {
-        ..default::Default::default()
-    };
-
-    db_options.compactor_options = Some(compactor_options);
-
-    db_options.object_store_cache_options = match cache_config {
-        Some(cache) => {
-            // Only set object store cache if root_folder is provided
-            match (&cache.root_folder, &cache.max_cache_size_gb) {
-                (Some(root_folder), Some(max_size_gb)) => ObjectStoreCacheOptions {
-                    root_folder: Some(PathBuf::from(root_folder)),
-                    max_cache_size_bytes: Some((max_size_gb * 1024 * 1024 * 1024) as usize),
-                    ..default::Default::default()
-                },
-                (Some(root_folder), None) => ObjectStoreCacheOptions {
-                    root_folder: Some(PathBuf::from(root_folder)),
-                    ..default::Default::default()
-                },
-                _ => ObjectStoreCacheOptions::default(),
+    let db_options = Settings {
+        compression_codec: Some(CompressionCodec::Lz4),
+        garbage_collector_options: Some(GarbageCollectorOptions {
+            wal_options: Some(garbage_collector_directory_options),
+            manifest_options: Some(garbage_collector_directory_options),
+            compacted_options: Some(garbage_collector_directory_options),
+        }),
+        object_store_cache_options: match cache_config {
+            Some(cache) => {
+                // Only set object store cache if root_folder is provided
+                match (&cache.root_folder, &cache.max_cache_size_gb) {
+                    (Some(root_folder), Some(max_size_gb)) => ObjectStoreCacheOptions {
+                        root_folder: Some(PathBuf::from(root_folder)),
+                        max_cache_size_bytes: Some((max_size_gb * 1024 * 1024 * 1024) as usize),
+                        ..default::Default::default()
+                    },
+                    (Some(root_folder), None) => ObjectStoreCacheOptions {
+                        root_folder: Some(PathBuf::from(root_folder)),
+                        ..default::Default::default()
+                    },
+                    _ => ObjectStoreCacheOptions::default(),
+                }
             }
-        }
-        None => ObjectStoreCacheOptions::default(),
+            None => ObjectStoreCacheOptions::default(),
+        },
+        ..Default::default()
     };
 
     let path = Path::from("ct_log");
