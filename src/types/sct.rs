@@ -1,5 +1,5 @@
 use crate::types::{CtError, LogEntryType, LogId, Result};
-use p256::ecdsa::{signature::Signer, Signature, SigningKey};
+use p256::ecdsa::{signature::Signer, DerSignature, SigningKey};
 use serde::{Deserialize, Serialize};
 
 /// Version of the SCT structure
@@ -142,7 +142,7 @@ impl SctBuilder {
 
         let signature_input = sct.get_signature_input(certificate, entry_type, issuer_key_hash);
 
-        let signature: Signature = self.signing_key.sign(&signature_input);
+        let signature: DerSignature = self.signing_key.sign(&signature_input);
 
         let mut tls_signature = Vec::new();
 
@@ -360,7 +360,7 @@ mod tests {
         // Verify the signature
         let signature_input = sct.get_signature_input(&certificate, LogEntryType::X509Entry, None);
         let sig_bytes = &sct.signature[4..];
-        let signature = Signature::from_bytes(sig_bytes.into()).unwrap();
+        let signature = DerSignature::from_bytes(sig_bytes).unwrap();
 
         assert!(verifying_key.verify(&signature_input, &signature).is_ok());
     }
@@ -394,7 +394,7 @@ mod tests {
             Some(&issuer_key_hash),
         );
         let sig_bytes = &sct.signature[4..];
-        let signature = Signature::from_bytes(sig_bytes.into()).unwrap();
+        let signature = DerSignature::from_bytes(sig_bytes).unwrap();
 
         assert!(verifying_key.verify(&signature_input, &signature).is_ok());
     }
@@ -434,5 +434,37 @@ mod tests {
 
         // Should use zeros for missing issuer key hash
         assert_eq!(&input[12..44], &[0u8; 32]);
+    }
+
+    #[test]
+    fn test_sct_signature_is_der_format() {
+        let (signing_key, _) = create_test_key_pair();
+        let private_key_bytes = signing_key.to_bytes();
+        let log_id = create_test_log_id();
+
+        let builder = SctBuilder::from_private_key_bytes(log_id, &private_key_bytes).unwrap();
+
+        let timestamp = 1234567890000u64;
+        let certificate = vec![0x01, 0x02, 0x03, 0x04];
+
+        let sct = builder
+            .create_sct_with_timestamp(&certificate, LogEntryType::X509Entry, None, timestamp)
+            .unwrap();
+
+        // Skip the TLS header (4 bytes) to get to the actual signature
+        let sig_bytes = &sct.signature[4..];
+
+        // DER signatures should start with 0x30 (SEQUENCE tag)
+        assert_eq!(
+            sig_bytes[0], 0x30,
+            "Signature should start with DER SEQUENCE tag"
+        );
+
+        // DER format is typically 70-72 bytes for P-256, raw format is exactly 64 bytes
+        assert!(
+            sig_bytes.len() > 64,
+            "DER signature should be longer than raw format"
+        );
+        assert!(sig_bytes.len() <= 72, "DER signature shouldn't be too long");
     }
 }

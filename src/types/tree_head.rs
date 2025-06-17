@@ -1,5 +1,5 @@
 use crate::types::{CtError, Result};
-use p256::ecdsa::{signature::Signer, Signature, SigningKey};
+use p256::ecdsa::{signature::Signer, DerSignature, SigningKey};
 use serde::{Deserialize, Serialize};
 
 /// Signed Tree Head (STH) as defined in RFC 6962
@@ -111,7 +111,7 @@ impl SthBuilder {
 
         let signature_input = sth.get_signature_input();
 
-        let signature: Signature = self.signing_key.sign(&signature_input);
+        let signature: DerSignature = self.signing_key.sign(&signature_input);
         sth.signature = signature.to_bytes().to_vec();
 
         Ok(sth)
@@ -266,7 +266,7 @@ mod tests {
 
         // Verify the signature
         let signature_input = sth.get_signature_input();
-        let signature = Signature::from_slice(&sth.signature).unwrap();
+        let signature = DerSignature::from_bytes(&sth.signature).unwrap();
 
         assert!(verifying_key.verify(&signature_input, &signature).is_ok());
     }
@@ -293,9 +293,41 @@ mod tests {
 
         // Verify the signature
         let signature_input = sth.get_signature_input();
-        let signature = Signature::from_slice(&sth.signature).unwrap();
+        let signature = DerSignature::from_bytes(&sth.signature).unwrap();
 
         assert!(verifying_key.verify(&signature_input, &signature).is_ok());
+    }
+
+    #[test]
+    fn test_sth_signature_is_der_format() {
+        let (signing_key, _) = create_test_key_pair();
+        let private_key_bytes = signing_key.to_bytes();
+
+        let builder = SthBuilder::from_private_key_bytes(&private_key_bytes).unwrap();
+
+        let tree_size = 100u64;
+        let root_hash = create_test_root_hash();
+        let timestamp = 1234567890000u64;
+
+        let sth = builder
+            .create_sth(tree_size, root_hash, Some(timestamp))
+            .unwrap();
+
+        // DER signatures should start with 0x30 (SEQUENCE tag)
+        assert_eq!(
+            sth.signature[0], 0x30,
+            "Signature should start with DER SEQUENCE tag"
+        );
+
+        // DER format is typically 70-72 bytes for P-256, raw format is exactly 64 bytes
+        assert!(
+            sth.signature.len() > 64,
+            "DER signature should be longer than raw format"
+        );
+        assert!(
+            sth.signature.len() <= 72,
+            "DER signature shouldn't be too long"
+        );
     }
 
     #[test]
