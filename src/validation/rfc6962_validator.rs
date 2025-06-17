@@ -315,12 +315,6 @@ impl Rfc6962Validator {
         if index == 0 {
             // Only check end-entity certificate against temporal window
             if let Some(window) = self.config.temporal_window {
-                let not_before: DateTime<Utc> = cert
-                    .tbs_certificate
-                    .validity
-                    .not_before
-                    .to_system_time()
-                    .into();
                 let not_after: DateTime<Utc> = cert
                     .tbs_certificate
                     .validity
@@ -328,19 +322,19 @@ impl Rfc6962Validator {
                     .to_system_time()
                     .into();
 
-                // Check if certificate validity period overlaps with the log's temporal window
+                // Check if certificate expires within the log's temporal window
                 if not_after < window.start {
                     return Err(CtError::BadRequest(format!(
-                        "Certificate expired before log temporal window starts: {} < {}",
+                        "Certificate expires before log temporal window starts: {} < {}",
                         not_after.format("%Y-%m-%d %H:%M:%S UTC"),
                         window.start.format("%Y-%m-%d %H:%M:%S UTC")
                     )));
                 }
 
-                if not_before > window.end {
+                if not_after >= window.end {
                     return Err(CtError::BadRequest(format!(
-                        "Certificate not valid until after log temporal window ends: {} > {}",
-                        not_before.format("%Y-%m-%d %H:%M:%S UTC"),
+                        "Certificate expires outside log temporal window: {} >= {}",
+                        not_after.format("%Y-%m-%d %H:%M:%S UTC"),
                         window.end.format("%Y-%m-%d %H:%M:%S UTC")
                     )));
                 }
@@ -1453,9 +1447,10 @@ mod tests {
             &root_key,
         );
 
-        // Create a config with a temporal window
-        let window_start = Utc::now() - chrono::Duration::days(30);
-        let window_end = Utc::now() + chrono::Duration::days(30);
+        // Create a config with a temporal window that should include the certificate's expiry
+        // Assuming the test certificate is valid for 1 year from now
+        let window_start = Utc::now();
+        let window_end = Utc::now() + chrono::Duration::days(400); // Wide enough to include cert expiry
 
         let config = Rfc6962ValidationConfig {
             trusted_roots_dir: roots_dir.clone(),
@@ -1468,37 +1463,59 @@ mod tests {
 
         let validator = create_test_validator(config).unwrap();
 
-        // Test 1: Certificate within the temporal window (should pass)
-        let chain = vec![ee_cert, root_cert];
+        // Test 1: Certificate that expires within the temporal window (should pass)
+        let chain = vec![ee_cert.clone(), root_cert.clone()];
         let result = validator.validate_chain(&chain).await;
         assert!(
             result.is_ok(),
-            "Certificate within temporal window should pass: {:?}",
+            "Certificate expiring within temporal window should pass: {:?}",
             result
         );
 
-        // Test 2: Certificate that expired before window start (should fail)
-        // We can't easily create a certificate with custom dates using our test helpers,
-        // so we'll test with a very restrictive window instead
-        let config_restrictive = Rfc6962ValidationConfig {
+        // Test 2: Certificate that expires before window start (should fail)
+        let config_future = Rfc6962ValidationConfig {
             trusted_roots_dir: roots_dir.clone(),
             temporal_window: Some(TemporalWindow {
-                start: Utc::now() + chrono::Duration::days(365),
+                start: Utc::now() + chrono::Duration::days(500), // Start after cert expires
                 end: Utc::now() + chrono::Duration::days(730),
             }),
             ..Default::default()
         };
 
-        let validator_restrictive = create_test_validator(config_restrictive).unwrap();
-        let result = validator_restrictive.validate_chain(&chain).await;
+        let validator_future = create_test_validator(config_future).unwrap();
+        let result = validator_future.validate_chain(&chain).await;
         assert!(
             result.is_err(),
-            "Certificate outside temporal window should fail"
+            "Certificate expiring before temporal window should fail"
         );
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("expired before log temporal window starts"),
-            "Error message should mention temporal window"
+            err_msg.contains("expires before log temporal window starts"),
+            "Error message should mention certificate expires before window: {}",
+            err_msg
+        );
+
+        // Test 3: Certificate that expires after window end (should fail)
+        let config_past = Rfc6962ValidationConfig {
+            trusted_roots_dir: roots_dir.clone(),
+            temporal_window: Some(TemporalWindow {
+                start: Utc::now() - chrono::Duration::days(100),
+                end: Utc::now() + chrono::Duration::days(30), // End before cert expires
+            }),
+            ..Default::default()
+        };
+
+        let validator_past = create_test_validator(config_past).unwrap();
+        let result = validator_past.validate_chain(&chain).await;
+        assert!(
+            result.is_err(),
+            "Certificate expiring after temporal window should fail"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("expires outside log temporal window"),
+            "Error message should mention certificate expires outside window: {}",
+            err_msg
         );
     }
 }
