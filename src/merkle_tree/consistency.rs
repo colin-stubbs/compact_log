@@ -130,24 +130,28 @@ mod tests {
     #[test]
     fn test_rfc6962_subproof_examples() {
         // Test the SUBPROOF algorithm with examples from RFC 6962
-        
-        // SUBPROOF(m, D[m], true) = {} 
+
+        // SUBPROOF(m, D[m], true) = {}
         let result = subproof(3, 3, true);
         assert!(result.is_empty(), "SUBPROOF(3, D[3], true) should be empty");
-        
+
         // SUBPROOF(m, D[m], false) = {MTH(D[m])}
         let result = subproof(3, 3, false);
-        assert_eq!(result.len(), 1, "SUBPROOF(3, D[3], false) should have one element");
+        assert_eq!(
+            result.len(),
+            1,
+            "SUBPROOF(3, D[3], false) should have one element"
+        );
         assert_eq!(result[0], compute_subtree_root(0, 3).as_u64());
-        
+
         // RFC 6962 example: PROOF(3, D[7]) = [c, d, g, l]
         let indices = indices_for_consistency_proof(3, 4); // 3 -> 7
         assert_eq!(indices.len(), 4, "PROOF(3, D[7]) should have 4 nodes");
-        
+
         // PROOF(4, D[8]) - power of 2 case
         let indices = indices_for_consistency_proof(4, 4); // 4 -> 8
         assert_eq!(indices.len(), 1, "PROOF(4, D[8]) should have 1 node");
-        
+
         // PROOF(1, D[2]) - single leaf extension
         let indices = indices_for_consistency_proof(1, 1); // 1 -> 2
         assert_eq!(indices.len(), 1, "PROOF(1, D[2]) should have 1 node");
@@ -156,26 +160,47 @@ mod tests {
     #[test]
     fn test_rfc6962_consistency_proof_bounds() {
         // RFC 6962 section 2.1.2: proof size bounded by ceil(log2(n)) + 1
-        
+
         struct BoundTest {
             old_size: u64,
             new_size: u64,
         }
-        
+
         let test_cases = vec![
-            BoundTest { old_size: 1, new_size: 2 },
-            BoundTest { old_size: 1, new_size: 8 },
-            BoundTest { old_size: 3, new_size: 7 },
-            BoundTest { old_size: 4, new_size: 8 },
-            BoundTest { old_size: 6, new_size: 10 },
-            BoundTest { old_size: 10, new_size: 20 },
-            BoundTest { old_size: 100, new_size: 200 },
+            BoundTest {
+                old_size: 1,
+                new_size: 2,
+            },
+            BoundTest {
+                old_size: 1,
+                new_size: 8,
+            },
+            BoundTest {
+                old_size: 3,
+                new_size: 7,
+            },
+            BoundTest {
+                old_size: 4,
+                new_size: 8,
+            },
+            BoundTest {
+                old_size: 6,
+                new_size: 10,
+            },
+            BoundTest {
+                old_size: 10,
+                new_size: 20,
+            },
+            BoundTest {
+                old_size: 100,
+                new_size: 200,
+            },
         ];
-        
+
         for tc in test_cases {
             let indices = indices_for_consistency_proof(tc.old_size, tc.new_size - tc.old_size);
             let max_proof_size = ((tc.new_size as f64).log2().ceil() as usize) + 1;
-            
+
             assert!(
                 indices.len() <= max_proof_size,
                 "Consistency proof from {} to {} has {} nodes, exceeds bound of {}",
@@ -190,16 +215,22 @@ mod tests {
     #[test]
     fn test_subproof_recursive_cases() {
         // Test the recursive cases of SUBPROOF
-        
+
         // m <= k: SUBPROOF(2, D[4], true) where k=2
         let result = subproof(2, 4, true);
-        assert!(!result.is_empty(), "SUBPROOF(2, D[4], true) should not be empty");
+        assert!(
+            !result.is_empty(),
+            "SUBPROOF(2, D[4], true) should not be empty"
+        );
         let last = result.last().unwrap();
         assert_eq!(*last, compute_subtree_root(2, 4).as_u64());
-        
+
         // m > k: SUBPROOF(3, D[4], true) where k=2
         let result = subproof(3, 4, true);
-        assert!(!result.is_empty(), "SUBPROOF(3, D[4], true) should not be empty");
+        assert!(
+            !result.is_empty(),
+            "SUBPROOF(3, D[4], true) should not be empty"
+        );
         let last = result.last().unwrap();
         assert_eq!(*last, compute_subtree_root(0, 2).as_u64());
     }
@@ -209,15 +240,15 @@ mod tests {
         // Single leaf subtrees
         let root = compute_subtree_root(0, 1);
         assert_eq!(root, LeafIdx::new(0).into());
-        
+
         let root = compute_subtree_root(5, 6);
         assert_eq!(root, LeafIdx::new(5).into());
-        
+
         // Power-of-2 sized subtrees
         let root_0_2 = compute_subtree_root(0, 2);
         let root_2_4 = compute_subtree_root(2, 4);
         assert_eq!(root_0_2.sibling(4), root_2_4);
-        
+
         // Non-power-of-2 sized subtrees
         let root_0_3 = compute_subtree_root(0, 3);
         let left_child = compute_subtree_root(0, 2);
@@ -228,26 +259,30 @@ mod tests {
     fn test_rfc6962_example_tree_consistency() {
         // RFC 6962 Section 2.1.3 example tree with 7 leaves
         // The consistency proof between hash0 and hash is PROOF(3, D[7]) = [c, d, g, l]
-        
+
         let indices = indices_for_consistency_proof(3, 4); // 3 -> 7
-        assert_eq!(indices.len(), 4, "PROOF(3, D[7]) should have exactly 4 nodes");
-        
+        assert_eq!(
+            indices.len(),
+            4,
+            "PROOF(3, D[7]) should have exactly 4 nodes"
+        );
+
         let g = compute_subtree_root(0, 2); // Root of [d0, d1]
         let l = compute_subtree_root(4, 7); // Root of [d4, d5, d6]
-        
+
         let c_idx: InternalIdx = LeafIdx::new(2).into();
         let d_idx: InternalIdx = LeafIdx::new(3).into();
         assert!(indices.contains(&c_idx.as_u64())); // c (d2)
-        assert!(indices.contains(&d_idx.as_u64())); // d (d3) 
+        assert!(indices.contains(&d_idx.as_u64())); // d (d3)
         assert!(indices.contains(&g.as_u64())); // g
         assert!(indices.contains(&l.as_u64())); // l
     }
 
-    #[test] 
+    #[test]
     fn test_rfc6962_proof_verification_algorithm() {
         // Consistency from size 1 to size 4
         let indices = indices_for_consistency_proof(1, 3);
-        
+
         // Need d1 and root of [d2, d3] to verify consistency
         let d1_idx: InternalIdx = LeafIdx::new(1).into();
         assert!(indices.contains(&d1_idx.as_u64()));
