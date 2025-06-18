@@ -506,7 +506,7 @@ pub async fn get_entries(
     let end = params.start + count - 1;
 
     crate::metrics::GET_ENTRIES_BATCH_SIZE
-        .with_label_values(&[])
+        .with_label_values::<&str>(&[])
         .observe(count as f64);
 
     let storage = state.storage.clone();
