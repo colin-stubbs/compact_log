@@ -18,6 +18,29 @@ This implementation provides a complete Certificate Transparency log that:
 - Provides inclusion and consistency proofs
 - Stores data in cloud object storage (S3, Azure Blob) or local filesystem
 
+## Performance Metrics
+
+CompactLog achieves exceptional performance through its batching strategy and efficient storage design:
+
+<p align="center">
+  <img src="assets/write_throughput.png" alt="Write Throughput" width="100%" />
+  <br/>
+  <em>Sustained write throughput of 3-4K requests/second across different certificate chain types</em>
+</p>
+
+### Key Performance Characteristics
+
+- **Zero Merge Delay**: Certificates are immediately incorporated into the Merkle tree
+- **High Throughput**: Sustained 3-4K certificate submissions per second
+- **Low Latency**: P95 latencies under 500ms, P99 under 1 second
+- **Efficient Deduplication**: ~67% certificate chain deduplication rate
+
+<p align="center">
+  <img src="assets/system_metrics.png" alt="System Metrics" width="100%" />
+  <br/>
+  <em>Real-time system metrics showing tree growth, SCT issuance success rate, and zero storage queue backlog</em>
+</p>
+
 ## Storage Architecture
 
 ### Core Design Decisions
@@ -28,7 +51,7 @@ CompactLog makes three fundamental design choices that differentiate it from oth
 2. **STH-boundary versioning** - only persisting tree state at published checkpoints.
 3. **Synchronous tree updates** - achieving a Maximum Merge Delay (MMD) of 0 seconds.
 
-### How MD is Eliminated Entirely
+### How MMD is Eliminated Entirely
 
 Many CT log implementations have a Merge Delay (MD) of minutes to hours, where submitted certificates aren't yet included in the Merkle tree. This exists because:
 
@@ -46,12 +69,35 @@ Submission 3 ─┘                             └── Certificates already i
 
 The 500ms delay is submission latency, not a merge delay. Once SCTs are issued, certificates are already in the tree.
 
+### Batching Strategy in Action
+
+<p align="center">
+  <img src="assets/write_requests_detailed.png" alt="Batching Strategy" width="100%" />
+  <br/>
+  <em>Write request patterns showing effective batching - spikes at the beginning represent batch formation</em>
+</p>
+
 The batching system:
 
 - Collects submissions for up to 500ms (configurable) to form a batch
 - Updates the Merkle tree once for the entire batch
 - Returns SCTs only after certificates are incorporated in the tree
 - No background processing - certificates are immediately available for proofs
+
+### Request Latency Profile
+
+<p align="center">
+  <img src="assets/request_latency.png" alt="Request Latency" width="100%" />
+  <br/>
+  <em>P95 and P99 latencies showing consistent sub-second response times across all operation types</em>
+</p>
+
+The latency profile demonstrates:
+
+- **P95 add-chain**: 471ms (includes batching delay)
+- **P95 add-pre-chain**: 513ms
+- **P95 get operations**: 52-68ms
+- **P99 latencies**: Generally under 1 second
 
 ### Traditional vs CompactLog Timing
 
@@ -100,6 +146,12 @@ entry:{index} → deduplicated log entry
 
 ### Certificate Chain Deduplication
 
+<p align="center">
+  <img src="assets/deduplication_rate.png" alt="Certificate Deduplication" width="100%" />
+  <br/>
+  <em>Consistent ~67% deduplication rate for certificate chains, significantly reducing storage requirements</em>
+</p>
+
 CompactLog stores certificate chains using content-addressable storage:
 
 1. **Entry structure**: Each log entry stores SHA-256 hashes of certificates rather than the certificates themselves
@@ -108,6 +160,7 @@ CompactLog stores certificate chains using content-addressable storage:
 4. **Reconstruction**: The API reconstructs full certificate chains by resolving hash references during retrieval
 
 The `DeduplicatedLogEntry` structure contains:
+
 - Certificate hash (32 bytes)
 - Chain certificate hashes (array of 32-byte hashes)
 - Original metadata (timestamp, index, entry type)
