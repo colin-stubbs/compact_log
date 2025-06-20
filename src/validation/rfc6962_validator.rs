@@ -802,12 +802,7 @@ mod tests {
             root_pem.push('\n');
         }
         root_pem.push_str("-----END CERTIFICATE-----\n");
-        println!("Root certificate PEM:\n{}", root_pem);
-        println!("Writing to: {:?}", roots_dir.join("root.pem"));
         fs::write(roots_dir.join("root.pem"), &root_pem).unwrap();
-
-        let contents = fs::read_to_string(roots_dir.join("root.pem")).unwrap();
-        println!("Read back: {} bytes", contents.len());
 
         // Create end-entity certificate signed by root
         let ee_cert = create_test_certificate_with_key(
@@ -818,12 +813,6 @@ mod tests {
             &ee_key,
             &root_key, // Signed by root
         );
-
-        println!("Directory contents of {:?}:", roots_dir);
-        for entry in fs::read_dir(&roots_dir).unwrap() {
-            let entry = entry.unwrap();
-            println!("  - {:?}", entry.path());
-        }
 
         let config = Rfc6962ValidationConfig {
             trusted_roots_dir: roots_dir.clone(),
@@ -837,17 +826,8 @@ mod tests {
 
         let validator = create_test_validator(config).unwrap();
 
-        println!(
-            "Validator has {} trusted roots",
-            validator.trusted_roots.len()
-        );
-
         let chain = vec![ee_cert, root_cert];
         let result = validator.validate_chain(&chain).await;
-
-        if let Err(e) = &result {
-            println!("Validation error: {}", e);
-        }
 
         assert!(
             result.is_ok(),
@@ -907,10 +887,6 @@ mod tests {
 
         let chain = vec![precert, root_cert];
         let result = validator.validate_chain(&chain).await;
-
-        if let Err(e) = &result {
-            println!("Validation error: {}", e);
-        }
 
         assert!(
             result.is_ok(),
