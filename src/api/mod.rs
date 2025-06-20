@@ -196,6 +196,22 @@ use crate::metrics;
 use axum::{body::Body, extract::Request};
 use std::time::Instant;
 
+fn is_static_ct_endpoint(path: &str) -> bool {
+    path == "/checkpoint" || path.starts_with("/tile/") || path.starts_with("/issuer/")
+}
+
+fn normalize_path_for_metrics(path: &str) -> String {
+    if path == "/checkpoint" {
+        path.to_string()
+    } else if path.starts_with("/tile/") {
+        "/tile".to_string()
+    } else if path.starts_with("/issuer/") {
+        "/issuer".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
 async fn metrics_middleware(
     req: Request<Body>,
     next: axum::middleware::Next,
@@ -211,14 +227,17 @@ async fn metrics_middleware(
     let duration = start.elapsed().as_secs_f64();
     let status = response.status().as_u16().to_string();
 
-    // Only track CT API endpoints, not health or metrics
-    if path.starts_with("/ct/v1/") {
+    // Track both CT API and static CT endpoints
+    if path.starts_with("/ct/v1/") || is_static_ct_endpoint(&path) {
+        // Normalize path to avoid cardinality explosion
+        let normalized_path = normalize_path_for_metrics(&path);
+
         metrics::HTTP_REQUEST_DURATION_SECONDS
-            .with_label_values(&[&path, &method])
+            .with_label_values(&[&normalized_path, &method])
             .observe(duration);
 
         metrics::HTTP_REQUESTS_TOTAL
-            .with_label_values(&[&path, &method, &status])
+            .with_label_values(&[&normalized_path, &method, &status])
             .inc();
     }
 

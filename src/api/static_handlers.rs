@@ -1,5 +1,6 @@
 use crate::api::{ApiState, ErrorResponse};
 use crate::merkle_tree::compute_subtree_root;
+use crate::metrics;
 use crate::types::tiles::{parse_tile_index, DataTile, Tile, TileLeaf};
 use axum::{
     body::Body,
@@ -17,11 +18,12 @@ use std::sync::Arc;
 pub async fn get_checkpoint(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Response, (StatusCode, axum::Json<ErrorResponse>)> {
-    let committed_root = state
-        .merkle_tree
-        .committed_root()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(e.into())))?;
+    let committed_root = state.merkle_tree.committed_root().await.map_err(|e| {
+        metrics::STATIC_CT_CHECKPOINT_REQUESTS
+            .with_label_values(&["error"])
+            .inc();
+        (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(e.into()))
+    })?;
 
     let tree_size = committed_root.num_leaves();
     let root_hash = committed_root.as_bytes().to_vec();
@@ -30,7 +32,12 @@ pub async fn get_checkpoint(
     let checkpoint = state
         .sth_builder
         .create_checkpoint(tree_size, root_hash, Some(timestamp))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(e.into())))?;
+        .map_err(|e| {
+            metrics::STATIC_CT_CHECKPOINT_REQUESTS
+                .with_label_values(&["error"])
+                .inc();
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(e.into()))
+        })?;
 
     let response = Response::builder()
         .status(StatusCode::OK)
@@ -38,6 +45,9 @@ pub async fn get_checkpoint(
         .header(header::CACHE_CONTROL, "max-age=5, must-revalidate")
         .body(checkpoint.format())
         .map_err(|_| {
+            metrics::STATIC_CT_CHECKPOINT_REQUESTS
+                .with_label_values(&["error"])
+                .inc();
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(ErrorResponse {
@@ -45,6 +55,10 @@ pub async fn get_checkpoint(
                 }),
             )
         })?;
+
+    metrics::STATIC_CT_CHECKPOINT_REQUESTS
+        .with_label_values(&["success"])
+        .inc();
 
     Ok(response.into_response())
 }
@@ -54,6 +68,9 @@ pub async fn get_tile(
     Path((level, index_path, width)): Path<(u8, String, Option<u16>)>,
 ) -> Result<Response, (StatusCode, axum::Json<ErrorResponse>)> {
     if level > 5 {
+        metrics::STATIC_CT_TILE_REQUESTS
+            .with_label_values(&["merkle", "error"])
+            .inc();
         return Err((
             StatusCode::BAD_REQUEST,
             axum::Json(ErrorResponse {
@@ -63,6 +80,9 @@ pub async fn get_tile(
     }
 
     let tile_index = parse_tile_index(&index_path).map_err(|e| {
+        metrics::STATIC_CT_TILE_REQUESTS
+            .with_label_values(&["merkle", "error"])
+            .inc();
         (
             StatusCode::BAD_REQUEST,
             axum::Json(ErrorResponse {
@@ -73,6 +93,9 @@ pub async fn get_tile(
 
     if let Some(w) = width {
         if w == 0 || w > 256 {
+            metrics::STATIC_CT_TILE_REQUESTS
+                .with_label_values(&["merkle", "error"])
+                .inc();
             return Err((
                 StatusCode::BAD_REQUEST,
                 axum::Json(ErrorResponse {
@@ -82,14 +105,21 @@ pub async fn get_tile(
         }
     }
 
-    let committed_root = state
-        .merkle_tree
-        .committed_root()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(e.into())))?;
+    let committed_root = state.merkle_tree.committed_root().await.map_err(|e| {
+        metrics::STATIC_CT_TILE_REQUESTS
+            .with_label_values(&["merkle", "error"])
+            .inc();
+        (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(e.into()))
+    })?;
     let tree_size = committed_root.num_leaves();
 
-    let tile = generate_merkle_tile(&state, level, tile_index, tree_size, width).await?;
+    let tile = generate_merkle_tile(&state, level, tile_index, tree_size, width)
+        .await
+        .inspect_err(|_| {
+            metrics::STATIC_CT_TILE_REQUESTS
+                .with_label_values(&["merkle", "error"])
+                .inc();
+        })?;
 
     if level == 1 && tile_index == 3 {
         tracing::debug!(
@@ -101,12 +131,19 @@ pub async fn get_tile(
 
     let tile_data = tile.to_bytes();
 
+    metrics::STATIC_CT_TILE_SIZE_BYTES
+        .with_label_values(&["merkle"])
+        .observe(tile_data.len() as f64);
+
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::CACHE_CONTROL, "max-age=31536000, immutable")
         .body(Body::from(tile_data))
         .map_err(|_| {
+            metrics::STATIC_CT_TILE_REQUESTS
+                .with_label_values(&["merkle", "error"])
+                .inc();
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(ErrorResponse {
@@ -114,6 +151,10 @@ pub async fn get_tile(
                 }),
             )
         })?;
+
+    metrics::STATIC_CT_TILE_REQUESTS
+        .with_label_values(&["merkle", "success"])
+        .inc();
 
     Ok(response)
 }
@@ -299,6 +340,9 @@ pub async fn get_data_tile(
     Path((index_path, width)): Path<(String, Option<u16>)>,
 ) -> Result<Response, (StatusCode, axum::Json<ErrorResponse>)> {
     let tile_index = parse_tile_index(&index_path).map_err(|e| {
+        metrics::STATIC_CT_TILE_REQUESTS
+            .with_label_values(&["data", "error"])
+            .inc();
         (
             StatusCode::BAD_REQUEST,
             axum::Json(ErrorResponse {
@@ -309,6 +353,9 @@ pub async fn get_data_tile(
 
     if let Some(w) = width {
         if w == 0 || w > 256 {
+            metrics::STATIC_CT_TILE_REQUESTS
+                .with_label_values(&["data", "error"])
+                .inc();
             return Err((
                 StatusCode::BAD_REQUEST,
                 axum::Json(ErrorResponse {
@@ -318,18 +365,28 @@ pub async fn get_data_tile(
         }
     }
 
-    let committed_root = state
-        .merkle_tree
-        .committed_root()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(e.into())))?;
+    let committed_root = state.merkle_tree.committed_root().await.map_err(|e| {
+        metrics::STATIC_CT_TILE_REQUESTS
+            .with_label_values(&["data", "error"])
+            .inc();
+        (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(e.into()))
+    })?;
     let tree_size = committed_root.num_leaves();
 
-    let data_tile = generate_data_tile(&state, tile_index, tree_size, width).await?;
+    let data_tile = generate_data_tile(&state, tile_index, tree_size, width)
+        .await
+        .inspect_err(|_| {
+            metrics::STATIC_CT_TILE_REQUESTS
+                .with_label_values(&["data", "error"])
+                .inc();
+        })?;
 
     // Always compress data tiles with gzip as per spec
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&data_tile.data).map_err(|_| {
+        metrics::STATIC_CT_TILE_REQUESTS
+            .with_label_values(&["data", "error"])
+            .inc();
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(ErrorResponse {
@@ -338,6 +395,9 @@ pub async fn get_data_tile(
         )
     })?;
     let compressed = encoder.finish().map_err(|_| {
+        metrics::STATIC_CT_TILE_REQUESTS
+            .with_label_values(&["data", "error"])
+            .inc();
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(ErrorResponse {
@@ -346,6 +406,10 @@ pub async fn get_data_tile(
         )
     })?;
 
+    metrics::STATIC_CT_TILE_SIZE_BYTES
+        .with_label_values(&["data"])
+        .observe(compressed.len() as f64);
+
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
@@ -353,6 +417,9 @@ pub async fn get_data_tile(
         .header(header::CACHE_CONTROL, "max-age=31536000, immutable")
         .body(Body::from(compressed))
         .map_err(|_| {
+            metrics::STATIC_CT_TILE_REQUESTS
+                .with_label_values(&["data", "error"])
+                .inc();
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(ErrorResponse {
@@ -360,6 +427,10 @@ pub async fn get_data_tile(
                 }),
             )
         })?;
+
+    metrics::STATIC_CT_TILE_REQUESTS
+        .with_label_values(&["data", "success"])
+        .inc();
 
     Ok(response)
 }
@@ -473,6 +544,9 @@ pub async fn get_issuer(
     Path(fingerprint): Path<String>,
 ) -> Result<Response, (StatusCode, axum::Json<ErrorResponse>)> {
     let fingerprint_bytes = hex::decode(&fingerprint).map_err(|_| {
+        metrics::STATIC_CT_ISSUER_REQUESTS
+            .with_label_values(&["error"])
+            .inc();
         (
             StatusCode::BAD_REQUEST,
             axum::Json(ErrorResponse {
@@ -482,6 +556,9 @@ pub async fn get_issuer(
     })?;
 
     if fingerprint_bytes.len() != 32 {
+        metrics::STATIC_CT_ISSUER_REQUESTS
+            .with_label_values(&["error"])
+            .inc();
         return Err((
             StatusCode::BAD_REQUEST,
             axum::Json(ErrorResponse {
@@ -498,6 +575,9 @@ pub async fn get_issuer(
         .get_certificate(&fingerprint_array)
         .await
         .map_err(|e| {
+            metrics::STATIC_CT_ISSUER_REQUESTS
+                .with_label_values(&["error"])
+                .inc();
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(ErrorResponse {
@@ -506,6 +586,9 @@ pub async fn get_issuer(
             )
         })?
         .ok_or_else(|| {
+            metrics::STATIC_CT_ISSUER_REQUESTS
+                .with_label_values(&["not_found"])
+                .inc();
             (
                 StatusCode::NOT_FOUND,
                 axum::Json(ErrorResponse {
@@ -520,6 +603,9 @@ pub async fn get_issuer(
         .header(header::CACHE_CONTROL, "max-age=31536000, immutable")
         .body(Body::from(certificate))
         .map_err(|_| {
+            metrics::STATIC_CT_ISSUER_REQUESTS
+                .with_label_values(&["error"])
+                .inc();
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(ErrorResponse {
@@ -527,6 +613,10 @@ pub async fn get_issuer(
                 }),
             )
         })?;
+
+    metrics::STATIC_CT_ISSUER_REQUESTS
+        .with_label_values(&["success"])
+        .inc();
 
     Ok(response)
 }

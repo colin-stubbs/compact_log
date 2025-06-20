@@ -120,6 +120,31 @@ lazy_static! {
         &["component"]
     )
     .unwrap();
+    pub static ref STATIC_CT_CHECKPOINT_REQUESTS: IntCounterVec = register_int_counter_vec!(
+        "static_ct_checkpoint_requests_total",
+        "Total number of static CT checkpoint requests",
+        &["status"]
+    )
+    .unwrap();
+    pub static ref STATIC_CT_TILE_REQUESTS: IntCounterVec = register_int_counter_vec!(
+        "static_ct_tile_requests_total",
+        "Total number of static CT tile requests",
+        &["tile_type", "status"]
+    )
+    .unwrap();
+    pub static ref STATIC_CT_ISSUER_REQUESTS: IntCounterVec = register_int_counter_vec!(
+        "static_ct_issuer_requests_total",
+        "Total number of static CT issuer lookup requests",
+        &["status"]
+    )
+    .unwrap();
+    pub static ref STATIC_CT_TILE_SIZE_BYTES: HistogramVec = register_histogram_vec!(
+        "static_ct_tile_size_bytes",
+        "Size of static CT tiles in bytes",
+        &["tile_type"],
+        vec![1024.0, 4096.0, 16384.0, 65536.0, 262144.0, 1048576.0]
+    )
+    .unwrap();
 }
 
 pub fn init_metrics() {
@@ -143,4 +168,8 @@ pub fn init_metrics() {
     lazy_static::initialize(&INCLUSION_PROOF_REQUESTS);
     lazy_static::initialize(&CONSISTENCY_PROOF_REQUESTS);
     lazy_static::initialize(&HEALTH_CHECK_STATUS);
+    lazy_static::initialize(&STATIC_CT_CHECKPOINT_REQUESTS);
+    lazy_static::initialize(&STATIC_CT_TILE_REQUESTS);
+    lazy_static::initialize(&STATIC_CT_ISSUER_REQUESTS);
+    lazy_static::initialize(&STATIC_CT_TILE_SIZE_BYTES);
 }

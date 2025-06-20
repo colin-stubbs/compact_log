@@ -427,8 +427,8 @@
             "uid": "grafanacloud-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(http_requests_total{endpoint=~\"/ct/v1/get-.*\"}[1m]))",
-          "legendFormat": "Get Entries {{status}}",
+          "expr": "sum(rate(http_requests_total{endpoint=~\"/ct/v1/get-.*|/checkpoint|/tile|/issuer\", method=\"GET\"}[1m])) by (endpoint)",
+          "legendFormat": "{{endpoint}}",
           "range": true,
           "refId": "A"
         }
