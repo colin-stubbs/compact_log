@@ -102,8 +102,6 @@ impl KeyPrefix {
 pub struct CtStorage {
     pub(crate) db: Arc<Db>,
     batch_sender: mpsc::Sender<BatchEntry>,
-    #[allow(dead_code)]
-    merkle_tree: StorageBackedMerkleTree,
 }
 
 impl BatchConfig {
@@ -142,11 +140,7 @@ impl CtStorage {
             Self::metrics_worker(metrics_sender, metrics_stats).await;
         });
 
-        Ok(Self {
-            db,
-            batch_sender,
-            merkle_tree,
-        })
+        Ok(Self { db, batch_sender })
     }
 
     /// Add entry to batch queue and return assigned index and SCT
