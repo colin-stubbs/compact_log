@@ -207,7 +207,7 @@ async fn generate_merkle_tile(
 
     if level == 0 {
         let futures: Vec<_> = (0..max_hashes)
-            .map(|i| {
+            .filter_map(|i| {
                 let leaf_index = start_offset + i;
                 if leaf_index >= tree_size {
                     None
@@ -215,7 +215,7 @@ async fn generate_merkle_tile(
                     let node_index = 2 * leaf_index;
                     let merkle_tree = state.merkle_tree.clone();
 
-                    Some(tokio::spawn(async move {
+                    Some(async move {
                         let hash = merkle_tree
                             .get_node_hash_at_version(node_index, tree_size)
                             .await?;
@@ -223,34 +223,19 @@ async fn generate_merkle_tile(
                         let mut hash_array = [0u8; 32];
                         hash_array.copy_from_slice(hash.as_slice());
                         Ok::<[u8; 32], crate::types::CtError>(hash_array)
-                    }))
+                    })
                 }
             })
             .collect();
 
-        let valid_futures: Vec<_> = futures.into_iter().flatten().collect();
-
-        let results = try_join_all(valid_futures).await.map_err(|e| {
+        let hashes: Vec<[u8; 32]> = try_join_all(futures).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(ErrorResponse {
-                    error: format!("Task failed: {}", e),
+                    error: format!("Failed to get leaf hash: {}", e),
                 }),
             )
         })?;
-
-        let hashes: Vec<[u8; 32]> =
-            results
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        axum::Json(ErrorResponse {
-                            error: format!("Failed to get leaf hash: {}", e),
-                        }),
-                    )
-                })?;
 
         if hashes.is_empty() {
             return Err((
@@ -264,7 +249,7 @@ async fn generate_merkle_tile(
         Ok(Tile::new(level, tile_index, hashes))
     } else {
         let futures: Vec<_> = (0..max_hashes)
-            .map(|i| {
+            .filter_map(|i| {
                 let position_in_tile = i;
                 let subtree_size = 256u64.pow(level as u32);
                 let start_leaf = (tile_index * 256 + position_in_tile) * subtree_size;
@@ -274,7 +259,7 @@ async fn generate_merkle_tile(
                 } else {
                     let merkle_tree = state.merkle_tree.clone();
 
-                    Some(tokio::spawn(async move {
+                    Some(async move {
                         let end_leaf = std::cmp::min(start_leaf + subtree_size, tree_size);
                         let actual_subtree_size = end_leaf - start_leaf;
                         let subtree_root_idx = compute_subtree_root(start_leaf, end_leaf);
@@ -293,34 +278,19 @@ async fn generate_merkle_tile(
                         let mut hash_array = [0u8; 32];
                         hash_array.copy_from_slice(hash.as_slice());
                         Ok::<[u8; 32], crate::types::CtError>(hash_array)
-                    }))
+                    })
                 }
             })
             .collect();
 
-        let valid_futures: Vec<_> = futures.into_iter().flatten().collect();
-
-        let results = try_join_all(valid_futures).await.map_err(|e| {
+        let hashes: Vec<[u8; 32]> = try_join_all(futures).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(ErrorResponse {
-                    error: format!("Task failed: {}", e),
+                    error: format!("Failed to get node hash: {}", e),
                 }),
             )
         })?;
-
-        let hashes: Vec<[u8; 32]> =
-            results
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        axum::Json(ErrorResponse {
-                            error: format!("Failed to get node hash: {}", e),
-                        }),
-                    )
-                })?;
 
         if hashes.is_empty() {
             return Err((
@@ -451,14 +421,14 @@ async fn generate_data_tile(
     };
 
     let futures: Vec<_> = (0..max_entries)
-        .map(|i| {
+        .filter_map(|i| {
             let entry_index = start_offset + i;
             if entry_index >= tree_size {
                 None
             } else {
                 let storage = state.storage.clone();
 
-                Some(tokio::spawn(async move {
+                Some(async move {
                     let entry = storage
                         .get_deduplicated_entry(entry_index)
                         .await?
@@ -493,34 +463,19 @@ async fn generate_data_tile(
                     let leaf_bytes = tile_leaf.to_bytes();
 
                     Ok::<Vec<u8>, crate::types::CtError>(leaf_bytes)
-                }))
+                })
             }
         })
         .collect();
 
-    let valid_futures: Vec<_> = futures.into_iter().flatten().collect();
-
-    let results = try_join_all(valid_futures).await.map_err(|e| {
+    let leaf_bytes_vec: Vec<Vec<u8>> = try_join_all(futures).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(ErrorResponse {
-                error: format!("Task failed: {}", e),
+                error: format!("Failed to get entry data: {}", e),
             }),
         )
     })?;
-
-    let leaf_bytes_vec: Vec<Vec<u8>> =
-        results
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(ErrorResponse {
-                        error: format!("Failed to get entry data: {}", e),
-                    }),
-                )
-            })?;
 
     if leaf_bytes_vec.is_empty() {
         return Err((
