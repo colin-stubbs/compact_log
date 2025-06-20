@@ -352,7 +352,7 @@ pub async fn get_data_tile(
         })?;
 
     // Always compress data tiles with gzip as per spec
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
     encoder.write_all(&data_tile.data).map_err(|_| {
         metrics::STATIC_CT_TILE_REQUESTS
             .with_label_values(&["data", "error"])
