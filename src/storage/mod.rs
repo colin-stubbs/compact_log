@@ -535,16 +535,6 @@ impl CtStorage {
                 }
             }
 
-            // Precompute subtree roots for static API for the range we're about to add
-            let end_index = starting_index + batch_size as u64;
-            let precomputed_subtree_roots = merkle_tree
-                .precompute_tile_subtree_roots_for_range(starting_index, end_index)
-                .await
-                .expect("Precomputing tile subtree roots should never fail");
-
-            // Add precomputed subtree roots to additional_data
-            additional_data.extend(precomputed_subtree_roots);
-
             tracing::trace!("Elapsed time before batch push: {:?}", start_time.elapsed());
             match merkle_tree
                 .batch_push_with_data(leaf_data_vec, additional_data)

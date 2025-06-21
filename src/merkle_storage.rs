@@ -233,25 +233,6 @@ impl StorageBackedMerkleTree {
                 )))
             })
     }
-
-    /// Precompute and store subtree roots for efficient static API tile generation
-    /// This computes subtree roots only for the range of entries specified
-    /// Returns a vector of (key, value) pairs to be included in the batch write
-    pub async fn precompute_tile_subtree_roots_for_range(
-        &self,
-        start_index: u64,
-        end_index: u64,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        (*self.tree)
-            .precompute_tile_subtree_roots_for_range(start_index, end_index)
-            .await
-            .map_err(|e| {
-                CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
-                    "Failed to precompute tile subtree roots: {:?}",
-                    e
-                )))
-            })
-    }
 }
 
 pub mod serialization {

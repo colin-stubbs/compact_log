@@ -10,7 +10,7 @@ use axum::{
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use futures::future::try_join_all;
+use futures::stream::{self, StreamExt, TryStreamExt};
 use std::io::Write;
 use std::sync::Arc;
 
@@ -167,7 +167,6 @@ async fn generate_merkle_tile(
     requested_width: Option<u16>,
 ) -> Result<Tile, (StatusCode, axum::Json<ErrorResponse>)> {
     let nodes_per_tile = 256u64;
-    let start_offset = tile_index * nodes_per_tile;
 
     let max_hashes = if let Some(w) = requested_width {
         w as u64
@@ -205,85 +204,45 @@ async fn generate_merkle_tile(
         ));
     }
 
-    if level == 0 {
-        let futures: Vec<_> = (0..max_hashes)
-            .filter_map(|i| {
-                let leaf_index = start_offset + i;
-                if leaf_index >= tree_size {
-                    None
-                } else {
-                    let node_index = 2 * leaf_index;
-                    let merkle_tree = state.merkle_tree.clone();
+    const CONCURRENCY_LIMIT: usize = 32;
 
-                    Some(async move {
-                        let hash = merkle_tree
-                            .get_node_hash_at_version(node_index, tree_size)
-                            .await?;
+    let hashes: Vec<[u8; 32]> = stream::iter(0..max_hashes)
+        .map(|i| {
+            let position_in_tile = i;
+            let subtree_size = 256u64.pow(level as u32);
+            let start_leaf = (tile_index * 256 + position_in_tile) * subtree_size;
+            let merkle_tree = state.merkle_tree.clone();
 
-                        let mut hash_array = [0u8; 32];
-                        hash_array.copy_from_slice(hash.as_slice());
-                        Ok::<[u8; 32], crate::types::CtError>(hash_array)
-                    })
-                }
-            })
-            .collect();
-
-        let hashes: Vec<[u8; 32]> = try_join_all(futures).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(ErrorResponse {
-                    error: format!("Failed to get leaf hash: {}", e),
-                }),
-            )
-        })?;
-
-        if hashes.is_empty() {
-            return Err((
-                StatusCode::NOT_FOUND,
-                axum::Json(ErrorResponse {
-                    error: "Tile not found".to_string(),
-                }),
-            ));
-        }
-
-        Ok(Tile::new(level, tile_index, hashes))
-    } else {
-        let futures: Vec<_> = (0..max_hashes)
-            .filter_map(|i| {
-                let position_in_tile = i;
-                let subtree_size = 256u64.pow(level as u32);
-                let start_leaf = (tile_index * 256 + position_in_tile) * subtree_size;
-
+            async move {
                 if start_leaf >= tree_size {
-                    None
+                    Ok(None)
                 } else {
-                    let merkle_tree = state.merkle_tree.clone();
+                    let end_leaf = std::cmp::min(start_leaf + subtree_size, tree_size);
+                    let actual_subtree_size = end_leaf - start_leaf;
+                    let subtree_root_idx = compute_subtree_root(start_leaf, end_leaf);
 
-                    Some(async move {
-                        let end_leaf = std::cmp::min(start_leaf + subtree_size, tree_size);
-                        let actual_subtree_size = end_leaf - start_leaf;
-                        let subtree_root_idx = compute_subtree_root(start_leaf, end_leaf);
+                    if actual_subtree_size < subtree_size {
+                        tracing::debug!(
+                            "Computing incomplete subtree: level={} tile={} pos={} start={} end={} size={} idx={}",
+                            level, tile_index, position_in_tile, start_leaf, end_leaf, actual_subtree_size, subtree_root_idx.as_u64()
+                        );
+                    }
 
-                        if actual_subtree_size < subtree_size {
-                            tracing::debug!(
-                                "Computing incomplete subtree: level={} tile={} pos={} start={} end={} size={} idx={}",
-                                level, tile_index, position_in_tile, start_leaf, end_leaf, actual_subtree_size, subtree_root_idx.as_u64()
-                            );
-                        }
+                    let hash = merkle_tree
+                        .get_node_hash_at_version(subtree_root_idx.as_u64(), tree_size)
+                        .await?;
 
-                        let hash = merkle_tree
-                            .get_node_hash_at_version(subtree_root_idx.as_u64(), tree_size)
-                            .await?;
-
-                        let mut hash_array = [0u8; 32];
-                        hash_array.copy_from_slice(hash.as_slice());
-                        Ok::<[u8; 32], crate::types::CtError>(hash_array)
-                    })
+                    let mut hash_array = [0u8; 32];
+                    hash_array.copy_from_slice(hash.as_slice());
+                    Ok::<Option<[u8; 32]>, crate::types::CtError>(Some(hash_array))
                 }
-            })
-            .collect();
-
-        let hashes: Vec<[u8; 32]> = try_join_all(futures).await.map_err(|e| {
+            }
+        })
+        .buffered(CONCURRENCY_LIMIT)
+        .try_filter_map(|x| async move { Ok(x) })
+        .try_collect()
+        .await
+        .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(ErrorResponse {
@@ -292,17 +251,16 @@ async fn generate_merkle_tile(
             )
         })?;
 
-        if hashes.is_empty() {
-            return Err((
-                StatusCode::NOT_FOUND,
-                axum::Json(ErrorResponse {
-                    error: "Tile not found".to_string(),
-                }),
-            ));
-        }
-
-        Ok(Tile::new(level, tile_index, hashes))
+    if hashes.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            axum::Json(ErrorResponse {
+                error: "Tile not found".to_string(),
+            }),
+        ));
     }
+
+    Ok(Tile::new(level, tile_index, hashes))
 }
 
 pub async fn get_data_tile(
@@ -420,15 +378,17 @@ async fn generate_data_tile(
         entries_per_tile
     };
 
-    let futures: Vec<_> = (0..max_entries)
-        .filter_map(|i| {
-            let entry_index = start_offset + i;
-            if entry_index >= tree_size {
-                None
-            } else {
-                let storage = state.storage.clone();
+    const CONCURRENCY_LIMIT: usize = 32;
 
-                Some(async move {
+    let leaf_bytes_vec: Vec<Vec<u8>> = stream::iter(0..max_entries)
+        .map(|i| {
+            let entry_index = start_offset + i;
+            let storage = state.storage.clone();
+
+            async move {
+                if entry_index >= tree_size {
+                    Ok(None)
+                } else {
                     let entry = storage
                         .get_deduplicated_entry(entry_index)
                         .await?
@@ -462,20 +422,22 @@ async fn generate_data_tile(
                     let tile_leaf = TileLeaf::from_entry(&entry, certificate, pre_certificate);
                     let leaf_bytes = tile_leaf.to_bytes();
 
-                    Ok::<Vec<u8>, crate::types::CtError>(leaf_bytes)
-                })
+                    Ok::<Option<Vec<u8>>, crate::types::CtError>(Some(leaf_bytes))
+                }
             }
         })
-        .collect();
-
-    let leaf_bytes_vec: Vec<Vec<u8>> = try_join_all(futures).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(ErrorResponse {
-                error: format!("Failed to get entry data: {}", e),
-            }),
-        )
-    })?;
+        .buffered(CONCURRENCY_LIMIT)
+        .try_filter_map(|x| async move { Ok(x) })
+        .try_collect()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(ErrorResponse {
+                    error: format!("Failed to get entry data: {}", e),
+                }),
+            )
+        })?;
 
     if leaf_bytes_vec.is_empty() {
         return Err((
