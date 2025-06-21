@@ -175,6 +175,36 @@ Every operation maintains strict consistency:
 - Proofs only available at STH boundaries (ensuring stable references)
 - No eventual consistency - all operations are immediately visible
 
+## Architectural Approach
+
+### The Static CT API Design Challenge
+
+The Static CT API was designed to serve immutable tiles from simple storage (like CDNs), but implementations still face fundamental challenges:
+
+1. **Sequencing**: Certificates must be assigned sequential indices
+2. **Deduplication**: Preventing duplicate entries requires state
+3. **Coordination**: Multiple writers need consistency guarantees
+4. **Atomicity**: Tiles must reflect a consistent tree state
+
+Many implementations require or heavily depend on external databases for:
+- Deduplication tracking and caching
+- Write coordination between multiple processes
+- Sequencing and state management
+- Staging and crash recovery mechanisms
+
+### CompactLog's Approach
+
+CompactLog uses a single LSM-tree database (SlateDB) that stores its data directly on cloud object storage (S3, Azure Blob) or POSIX filesystem. The same database handles:
+
+- Certificate sequencing through atomic batch operations
+- Deduplication via content-addressable storage keys
+- Tree versioning at STH boundaries
+- On-demand tile generation from stored nodes
+
+While CompactLog generates tiles dynamically rather than storing pre-computed files, its underlying storage consists entirely of immutable objects in cloud storage or append-only files on disk. All coordination, deduplication, and sequencing happen through this single storage layer without requiring additional databases or complex write pipelines.
+
+This design trades direct CDN serving of pre-generated tiles for a much simpler write path and operational model. The LSM-tree structure naturally fits CT's workload pattern - primarily appending new certificates while efficiently serving historical tree states at any STH boundary - all while leveraging the same cloud object storage that would typically host static tiles.
+
 ## Configuration
 
 Create `Config.toml` or let the system generate defaults:
