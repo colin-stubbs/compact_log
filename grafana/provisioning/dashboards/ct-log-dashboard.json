@@ -18,7 +18,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 16,
+  "id": 14,
   "links": [],
   "panels": [
     {
@@ -69,7 +69,7 @@
         "textMode": "auto",
         "wideLayout": true
       },
-      "pluginVersion": "12.1.0-89438",
+      "pluginVersion": "12.1.0-89781",
       "targets": [
         {
           "datasource": {
@@ -132,7 +132,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.1.0-89438",
+      "pluginVersion": "12.1.0-89781",
       "targets": [
         {
           "datasource": {
@@ -204,7 +204,7 @@
         "sizing": "auto",
         "text": {}
       },
-      "pluginVersion": "12.1.0-89438",
+      "pluginVersion": "12.1.0-89781",
       "targets": [
         {
           "datasource": {
@@ -299,7 +299,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.1.0-89438",
+      "pluginVersion": "12.1.0-89781",
       "targets": [
         {
           "datasource": {
@@ -419,7 +419,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.1.0-89438",
+      "pluginVersion": "12.1.0-89781",
       "targets": [
         {
           "datasource": {
@@ -431,6 +431,19 @@
           "legendFormat": "{{endpoint}}",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "grafanacloud-prom"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(http_requests_total{endpoint=~\"/ct/v1/get-.*|/checkpoint|/tile|/issuer\", method=\"GET\"}[1m]))",
+          "hide": false,
+          "instant": false,
+          "legendFormat": "Total read requests",
+          "range": true,
+          "refId": "B"
         }
       ],
       "title": "Read Requests per Second",
@@ -516,7 +529,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.1.0-89438",
+      "pluginVersion": "12.1.0-89781",
       "targets": [
         {
           "datasource": {
@@ -656,5 +669,5 @@
   "timezone": "",
   "title": "CompactLog Metrics",
   "uid": "compact_log-metrics",
-  "version": 8
+  "version": 2
 }
