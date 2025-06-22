@@ -260,7 +260,7 @@ async fn generate_merkle_tile(
         ));
     }
 
-    Ok(Tile::new(level, tile_index, hashes))
+    Ok(Tile::new(hashes))
 }
 
 pub async fn get_data_tile(

@@ -6,7 +6,7 @@ pub struct Tile {
 }
 
 impl Tile {
-    pub fn new(_level: u8, _index: u64, hashes: Vec<[u8; 32]>) -> Self {
+    pub fn new(hashes: Vec<[u8; 32]>) -> Self {
         let width = hashes.len() as u16;
         assert!(width > 0 && width <= 256, "Tile width must be 1-256");
         Self { hashes }
@@ -160,18 +160,18 @@ mod tests {
     #[test]
     fn test_tile_creation() {
         let hashes = vec![[0u8; 32]; 256];
-        let tile = Tile::new(0, 0, hashes.clone());
+        let tile = Tile::new(hashes.clone());
         assert_eq!(tile.hashes.len(), 256);
 
         let partial_hashes = vec![[0u8; 32]; 100];
-        let partial_tile = Tile::new(1, 5, partial_hashes.clone());
+        let partial_tile = Tile::new(partial_hashes.clone());
         assert_eq!(partial_tile.hashes.len(), 100);
     }
 
     #[test]
     fn test_tile_to_bytes() {
         let hashes = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
-        let tile = Tile::new(0, 0, hashes);
+        let tile = Tile::new(hashes);
         let bytes = tile.to_bytes();
         assert_eq!(bytes.len(), 3 * 32);
         assert_eq!(&bytes[0..32], &[1u8; 32]);
