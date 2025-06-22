@@ -34,11 +34,7 @@ pub struct TileLeaf {
 }
 
 impl TileLeaf {
-    pub fn from_entry(
-        entry: &DeduplicatedLogEntry,
-        _certificate: Vec<u8>,
-        pre_certificate: Option<Vec<u8>>,
-    ) -> Self {
+    pub fn from_entry(entry: &DeduplicatedLogEntry, pre_certificate: Option<Vec<u8>>) -> Self {
         let timestamped_entry_raw = entry.leaf_data[2..].to_vec();
 
         Self {

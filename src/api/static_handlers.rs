@@ -399,15 +399,6 @@ async fn generate_data_tile(
                             ))
                         })?;
 
-                    let certificate = storage
-                        .get_certificate(&entry.certificate_hash)
-                        .await?
-                        .ok_or_else(|| {
-                            crate::types::CtError::Internal(
-                                "Certificate not found in storage".to_string(),
-                            )
-                        })?;
-
                     let pre_certificate =
                         if entry.entry_type == crate::types::LogEntryType::PrecertEntry {
                             if let Some(precert_hash) = &entry.original_precert_hash {
@@ -419,7 +410,7 @@ async fn generate_data_tile(
                             None
                         };
 
-                    let tile_leaf = TileLeaf::from_entry(&entry, certificate, pre_certificate);
+                    let tile_leaf = TileLeaf::from_entry(&entry, pre_certificate);
                     let leaf_bytes = tile_leaf.to_bytes();
 
                     Ok::<Option<Vec<u8>>, crate::types::CtError>(Some(leaf_bytes))
