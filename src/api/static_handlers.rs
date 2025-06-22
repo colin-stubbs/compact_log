@@ -439,7 +439,8 @@ async fn generate_data_tile(
         ));
     }
 
-    let mut data = Vec::new();
+    let total_size = leaf_bytes_vec.iter().map(|v| v.len()).sum();
+    let mut data = Vec::with_capacity(total_size);
     for leaf_bytes in leaf_bytes_vec {
         data.extend_from_slice(&leaf_bytes);
     }
