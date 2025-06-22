@@ -504,6 +504,84 @@ pub async fn get_proof_by_hash(
     Ok(Json(response))
 }
 
+fn build_extra_data(log_entry: &LogEntry) -> Result<Vec<u8>, (StatusCode, Json<ErrorResponse>)> {
+    let mut extra_data = Vec::new();
+    match log_entry.entry_type {
+        crate::types::LogEntryType::X509Entry => {
+            // For X509ChainEntry, extra_data contains just the certificate_chain
+            if let Some(ref chain_data) = log_entry.chain {
+                // Calculate total chain length for TLS vector length prefix
+                let mut total_chain_len = 0u32;
+                for chain_cert in chain_data {
+                    total_chain_len += 3 + chain_cert.len() as u32; // 3-byte length + cert data
+                }
+
+                // TLS variable-length vector: chain length (3 bytes)
+                extra_data.push((total_chain_len >> 16) as u8);
+                extra_data.push((total_chain_len >> 8) as u8);
+                extra_data.push(total_chain_len as u8);
+
+                // Each certificate in the chain: length (3 bytes) + cert data
+                for chain_cert in chain_data {
+                    let cert_len = chain_cert.len() as u32;
+                    extra_data.push((cert_len >> 16) as u8);
+                    extra_data.push((cert_len >> 8) as u8);
+                    extra_data.push(cert_len as u8);
+                    extra_data.extend_from_slice(chain_cert);
+                }
+            } else {
+                // Empty chain: just the length field (0)
+                extra_data.extend_from_slice(&[0x00, 0x00, 0x00]);
+            }
+        }
+        crate::types::LogEntryType::PrecertEntry => {
+            // For PrecertChainEntry, extra_data contains the whole PrecertChainEntry structure
+            // struct { ASN.1Cert pre_certificate; ASN.1Cert precertificate_chain<0..2^24-1>; }
+
+            // Pre_certificate length (3 bytes) + pre_certificate data (original, not TBS)
+            if let Some(ref original_precert) = log_entry.original_precert {
+                let precert_len = original_precert.len() as u32;
+                extra_data.push((precert_len >> 16) as u8);
+                extra_data.push((precert_len >> 8) as u8);
+                extra_data.push(precert_len as u8);
+                extra_data.extend_from_slice(original_precert);
+            } else {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Missing original pre-certificate for PrecertEntry".to_string(),
+                    }),
+                ));
+            }
+
+            if let Some(ref chain_data) = log_entry.chain {
+                let mut total_chain_len = 0u32;
+                for chain_cert in chain_data {
+                    total_chain_len += 3 + chain_cert.len() as u32; // 3-byte length + cert data
+                }
+
+                // TLS variable-length vector: chain length (3 bytes)
+                extra_data.push((total_chain_len >> 16) as u8);
+                extra_data.push((total_chain_len >> 8) as u8);
+                extra_data.push(total_chain_len as u8);
+
+                // Each certificate in the chain: length (3 bytes) + cert data
+                for chain_cert in chain_data {
+                    let cert_len = chain_cert.len() as u32;
+                    extra_data.push((cert_len >> 16) as u8);
+                    extra_data.push((cert_len >> 8) as u8);
+                    extra_data.push(cert_len as u8);
+                    extra_data.extend_from_slice(chain_cert);
+                }
+            } else {
+                // Empty chain: just the length field (0)
+                extra_data.extend_from_slice(&[0x00, 0x00, 0x00]);
+            }
+        }
+    }
+    Ok(extra_data)
+}
+
 pub async fn get_entries(
     State(state): State<Arc<ApiState>>,
     Query(params): Query<GetEntriesRequest>,
@@ -558,81 +636,7 @@ pub async fn get_entries(
                 .serialize()
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
 
-            let mut extra_data = Vec::new();
-            match log_entry.entry_type {
-                crate::types::LogEntryType::X509Entry => {
-                    // For X509ChainEntry, extra_data contains just the certificate_chain
-                    if let Some(ref chain_data) = log_entry.chain {
-                        // Calculate total chain length for TLS vector length prefix
-                        let mut total_chain_len = 0u32;
-                        for chain_cert in chain_data {
-                            total_chain_len += 3 + chain_cert.len() as u32; // 3-byte length + cert data
-                        }
-
-                        // TLS variable-length vector: chain length (3 bytes)
-                        extra_data.push((total_chain_len >> 16) as u8);
-                        extra_data.push((total_chain_len >> 8) as u8);
-                        extra_data.push(total_chain_len as u8);
-
-                        // Each certificate in the chain: length (3 bytes) + cert data
-                        for chain_cert in chain_data {
-                            let cert_len = chain_cert.len() as u32;
-                            extra_data.push((cert_len >> 16) as u8);
-                            extra_data.push((cert_len >> 8) as u8);
-                            extra_data.push(cert_len as u8);
-                            extra_data.extend_from_slice(chain_cert);
-                        }
-                    } else {
-                        // Empty chain: just the length field (0)
-                        extra_data.extend_from_slice(&[0x00, 0x00, 0x00]);
-                    }
-                }
-                crate::types::LogEntryType::PrecertEntry => {
-                    // For PrecertChainEntry, extra_data contains the whole PrecertChainEntry structure
-                    // struct { ASN.1Cert pre_certificate; ASN.1Cert precertificate_chain<0..2^24-1>; }
-
-                    // Pre_certificate length (3 bytes) + pre_certificate data (original, not TBS)
-                    if let Some(ref original_precert) = log_entry.original_precert {
-                        let precert_len = original_precert.len() as u32;
-                        extra_data.push((precert_len >> 16) as u8);
-                        extra_data.push((precert_len >> 8) as u8);
-                        extra_data.push(precert_len as u8);
-                        extra_data.extend_from_slice(original_precert);
-                    } else {
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse {
-                                error: "Missing original pre-certificate for PrecertEntry"
-                                    .to_string(),
-                            }),
-                        ));
-                    }
-
-                    if let Some(ref chain_data) = log_entry.chain {
-                        let mut total_chain_len = 0u32;
-                        for chain_cert in chain_data {
-                            total_chain_len += 3 + chain_cert.len() as u32; // 3-byte length + cert data
-                        }
-
-                        // TLS variable-length vector: chain length (3 bytes)
-                        extra_data.push((total_chain_len >> 16) as u8);
-                        extra_data.push((total_chain_len >> 8) as u8);
-                        extra_data.push(total_chain_len as u8);
-
-                        // Each certificate in the chain: length (3 bytes) + cert data
-                        for chain_cert in chain_data {
-                            let cert_len = chain_cert.len() as u32;
-                            extra_data.push((cert_len >> 16) as u8);
-                            extra_data.push((cert_len >> 8) as u8);
-                            extra_data.push(cert_len as u8);
-                            extra_data.extend_from_slice(chain_cert);
-                        }
-                    } else {
-                        // Empty chain: just the length field (0)
-                        extra_data.extend_from_slice(&[0x00, 0x00, 0x00]);
-                    }
-                }
-            }
+            let extra_data = build_extra_data(&log_entry)?;
 
             let leaf_entry = LeafEntry {
                 leaf_input: STANDARD.encode(&leaf_input),
@@ -707,88 +711,11 @@ pub async fn get_entry_and_proof(
             )
         })?;
 
-    let chain_data = log_entry.chain.clone().unwrap_or_default();
-
     let leaf_input = log_entry
         .serialize()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
 
-    let mut extra_data = Vec::new();
-    match log_entry.entry_type {
-        crate::types::LogEntryType::X509Entry => {
-            // For X509ChainEntry, extra_data contains just the certificate_chain
-            if !chain_data.is_empty() {
-                // Calculate total chain length for TLS vector length prefix
-                let mut total_chain_len = 0u32;
-                for chain_cert in &chain_data {
-                    total_chain_len += 3 + chain_cert.len() as u32; // 3-byte length + cert data
-                }
-
-                // TLS variable-length vector: chain length (3 bytes)
-                extra_data.push((total_chain_len >> 16) as u8);
-                extra_data.push((total_chain_len >> 8) as u8);
-                extra_data.push(total_chain_len as u8);
-
-                // Each certificate in the chain: length (3 bytes) + cert data
-                for chain_cert in chain_data {
-                    let cert_len = chain_cert.len() as u32;
-                    extra_data.push((cert_len >> 16) as u8);
-                    extra_data.push((cert_len >> 8) as u8);
-                    extra_data.push(cert_len as u8);
-                    extra_data.extend_from_slice(&chain_cert);
-                }
-            } else {
-                // Empty chain: just the length field (0)
-                extra_data.extend_from_slice(&[0x00, 0x00, 0x00]);
-            }
-        }
-        crate::types::LogEntryType::PrecertEntry => {
-            // For PrecertChainEntry, extra_data contains the whole PrecertChainEntry structure
-            // struct { ASN.1Cert pre_certificate; ASN.1Cert precertificate_chain<0..2^24-1>; }
-
-            // Pre_certificate length (3 bytes) + pre_certificate data (original, not TBS)
-            if let Some(ref original_precert) = log_entry.original_precert {
-                let precert_len = original_precert.len() as u32;
-                extra_data.push((precert_len >> 16) as u8);
-                extra_data.push((precert_len >> 8) as u8);
-                extra_data.push(precert_len as u8);
-                extra_data.extend_from_slice(original_precert);
-            } else {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Missing original pre-certificate for PrecertEntry".to_string(),
-                    }),
-                ));
-            }
-
-            // Precertificate_chain (TLS variable-length vector)
-            if !chain_data.is_empty() {
-                // Calculate total chain length for TLS vector length prefix
-                let mut total_chain_len = 0u32;
-                for chain_cert in &chain_data {
-                    total_chain_len += 3 + chain_cert.len() as u32; // 3-byte length + cert data
-                }
-
-                // TLS variable-length vector: chain length (3 bytes)
-                extra_data.push((total_chain_len >> 16) as u8);
-                extra_data.push((total_chain_len >> 8) as u8);
-                extra_data.push(total_chain_len as u8);
-
-                // Each certificate in the chain: length (3 bytes) + cert data
-                for chain_cert in chain_data {
-                    let cert_len = chain_cert.len() as u32;
-                    extra_data.push((cert_len >> 16) as u8);
-                    extra_data.push((cert_len >> 8) as u8);
-                    extra_data.push(cert_len as u8);
-                    extra_data.extend_from_slice(&chain_cert);
-                }
-            } else {
-                // Empty chain: just the length field (0)
-                extra_data.extend_from_slice(&[0x00, 0x00, 0x00]);
-            }
-        }
-    }
+    let extra_data = build_extra_data(&log_entry)?;
 
     let proof = state
         .merkle_tree
