@@ -10,7 +10,7 @@ use axum::{
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use futures::stream::{self, StreamExt, TryStreamExt};
+use futures;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -204,16 +204,14 @@ async fn generate_merkle_tile(
         ));
     }
 
-    const CONCURRENCY_LIMIT: usize = 32;
-
-    let hashes: Vec<[u8; 32]> = stream::iter(0..max_hashes)
+    let tasks: Vec<_> = (0..max_hashes)
         .map(|i| {
             let position_in_tile = i;
             let subtree_size = 256u64.pow(level as u32);
             let start_leaf = (tile_index * 256 + position_in_tile) * subtree_size;
             let merkle_tree = state.merkle_tree.clone();
 
-            async move {
+            tokio::spawn(async move {
                 if start_leaf >= tree_size {
                     Ok(None)
                 } else {
@@ -236,20 +234,35 @@ async fn generate_merkle_tile(
                     hash_array.copy_from_slice(hash.as_slice());
                     Ok::<Option<[u8; 32]>, crate::types::CtError>(Some(hash_array))
                 }
-            }
+            })
         })
-        .buffered(CONCURRENCY_LIMIT)
-        .try_filter_map(|x| async move { Ok(x) })
-        .try_collect()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(ErrorResponse {
-                    error: format!("Failed to get node hash: {}", e),
-                }),
-            )
-        })?;
+        .collect();
+
+    let results = futures::future::try_join_all(tasks).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(ErrorResponse {
+                error: format!("Task failed: {}", e),
+            }),
+        )
+    })?;
+
+    let hashes: Vec<[u8; 32]> = results
+        .into_iter()
+        .map(|r| {
+            r.map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(ErrorResponse {
+                        error: format!("Failed to get node hash: {}", e),
+                    }),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     if hashes.is_empty() {
         return Err((
@@ -378,14 +391,12 @@ async fn generate_data_tile(
         entries_per_tile
     };
 
-    const CONCURRENCY_LIMIT: usize = 32;
-
-    let leaf_bytes_vec: Vec<Vec<u8>> = stream::iter(0..max_entries)
+    let tasks: Vec<_> = (0..max_entries)
         .map(|i| {
             let entry_index = start_offset + i;
             let storage = state.storage.clone();
 
-            async move {
+            tokio::spawn(async move {
                 if entry_index >= tree_size {
                     Ok(None)
                 } else {
@@ -415,20 +426,35 @@ async fn generate_data_tile(
 
                     Ok::<Option<Vec<u8>>, crate::types::CtError>(Some(leaf_bytes))
                 }
-            }
+            })
         })
-        .buffered(CONCURRENCY_LIMIT)
-        .try_filter_map(|x| async move { Ok(x) })
-        .try_collect()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(ErrorResponse {
-                    error: format!("Failed to get entry data: {}", e),
-                }),
-            )
-        })?;
+        .collect();
+
+    let results = futures::future::try_join_all(tasks).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(ErrorResponse {
+                error: format!("Task failed: {}", e),
+            }),
+        )
+    })?;
+
+    let leaf_bytes_vec: Vec<Vec<u8>> = results
+        .into_iter()
+        .map(|r| {
+            r.map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(ErrorResponse {
+                        error: format!("Failed to get entry data: {}", e),
+                    }),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     if leaf_bytes_vec.is_empty() {
         return Err((
