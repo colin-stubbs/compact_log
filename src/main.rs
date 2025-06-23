@@ -421,7 +421,7 @@ async fn initialize_storage(
             compacted_options: Some(garbage_collector_directory_options),
         }),
         compactor_options: Some(CompactorOptions {
-            max_concurrent_compactions: 8,
+            max_concurrent_compactions: 32,
             max_sst_size: 258 * 1024 * 1024,
             ..default::Default::default()
         }),
