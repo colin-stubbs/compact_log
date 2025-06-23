@@ -490,7 +490,6 @@ async fn initialize_storage(
     let db = Db::builder(path.clone(), blob_store.clone())
         .with_settings(db_options)
         .with_block_cache(block_cache)
-        .with_sst_block_size(slatedb::SstBlockSize::Block64Kib)
         .with_compaction_runtime(background_runtime.clone())
         .with_gc_runtime(background_runtime.clone())
         .build()
