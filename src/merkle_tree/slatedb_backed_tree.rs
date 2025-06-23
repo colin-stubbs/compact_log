@@ -100,8 +100,7 @@ where
 
     pub async fn new(db: Arc<Db>) -> Result<Self, SlateDbTreeError> {
         let cache = Cache::builder()
-            .max_capacity(500_000)
-            .time_to_live(std::time::Duration::from_secs(60 * 30)) // 30 minutes
+            .max_capacity(10_000_000) // 10M entries for trees up to 1B entries
             .build();
 
         let tree = Self {
