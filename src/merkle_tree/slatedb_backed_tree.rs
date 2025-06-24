@@ -1,4 +1,5 @@
 use crate::merkle_tree::{
+    compute_subtree_root,
     consistency::indices_for_consistency_proof,
     ct_merkle_vendored::{
         indices_for_inclusion_proof, leaf_hash, parent_hash, root_idx, ConsistencyProof,
@@ -76,6 +77,7 @@ const META_KEY: &[u8] = b"meta";
 const VERSIONED_NODE_PREFIX: &[u8] = b"vnode:";
 const COMMITTED_SIZE_KEY: &[u8] = b"committed_size";
 const NODE_LATEST_VERSION_PREFIX: &[u8] = b"nver:";
+const TILE_PREFIX: &[u8] = b"tile:merkle:";
 
 impl<H, T> SlateDbBackedTree<H, T>
 where
@@ -187,6 +189,29 @@ where
         }
     }
 
+    /// Generate key for storing a precomputed merkle tile
+    fn tile_key(level: u8, index: u64) -> Vec<u8> {
+        let mut key = Vec::with_capacity(TILE_PREFIX.len() + 1 + 8);
+        key.extend_from_slice(TILE_PREFIX);
+        key.push(level);
+        key.push(b':');
+        key.extend_from_slice(&index.to_be_bytes());
+        key
+    }
+
+    /// Retrieve a precomputed merkle tile
+    pub async fn get_tile(
+        &self,
+        level: u8,
+        index: u64,
+    ) -> Result<Option<Vec<u8>>, SlateDbTreeError> {
+        let key = Self::tile_key(level, index);
+        match self.db.get(&key).await? {
+            Some(bytes) => Ok(Some(bytes.to_vec())),
+            None => Ok(None),
+        }
+    }
+
     /// Appends multiple items to the tree along with additional key-value pairs in a single atomic batch.
     /// This ensures consistency between the merkle tree and any associated data.
     /// Returns the starting index of the newly added items.
@@ -195,7 +220,6 @@ where
         items: Vec<T>,
         additional_data: Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<u64, SlateDbTreeError> {
-        // Acquire write lock to ensure serialization of write operations
         let _write_guard = self.write_lock.lock().await;
 
         let starting_index = self.len().await?;
@@ -314,9 +338,109 @@ where
             batch.put(&key, &value);
         }
 
+        // Precompute tiles in the same batch for atomicity
+        self.precompute_tiles_batch(&mut batch, final_tree_size, &computed_hashes)
+            .await?;
+
+        // Single atomic write for both tree updates and tiles
         self.db.write(batch).await?;
 
         Ok(starting_index)
+    }
+
+    async fn precompute_tiles_batch(
+        &self,
+        batch: &mut WriteBatch,
+        tree_size: u64,
+        computed_hashes: &std::collections::BTreeMap<u64, digest::Output<H>>,
+    ) -> Result<(), SlateDbTreeError> {
+        for level in 0..=5u8 {
+            let subtree_size = 256u64.pow(level as u32);
+            let entries_per_tile = 256u64;
+
+            let full_subtrees = tree_size / subtree_size;
+            let has_partial = (tree_size % subtree_size) > 0;
+            let total_positions = full_subtrees + if has_partial { 1 } else { 0 };
+
+            let num_tiles = total_positions.div_ceil(entries_per_tile);
+
+            for tile_index in 0..num_tiles {
+                let start_position = tile_index * entries_per_tile;
+                let end_position =
+                    std::cmp::min(start_position + entries_per_tile, total_positions);
+
+                if start_position >= total_positions {
+                    continue;
+                }
+
+                let key = Self::tile_key(level, tile_index);
+                if let Ok(Some(_)) = self.db.get(&key).await {
+                    continue;
+                }
+
+                let tile_size = end_position - start_position;
+                if tile_size < entries_per_tile {
+                    continue;
+                }
+
+                let mut hashes = Vec::with_capacity(entries_per_tile as usize);
+
+                for position in start_position..end_position {
+                    let start_leaf = position * subtree_size;
+                    if start_leaf >= tree_size {
+                        break;
+                    }
+
+                    let end_leaf = std::cmp::min(start_leaf + subtree_size, tree_size);
+                    let subtree_root_idx = compute_subtree_root(start_leaf, end_leaf);
+
+                    let hash = if let Some(hash) = computed_hashes.get(&subtree_root_idx.as_u64()) {
+                        hash.clone()
+                    } else {
+                        self.get_node_hash_at_version(subtree_root_idx.as_u64(), tree_size)
+                            .await?
+                    };
+                    let mut hash_array = [0u8; 32];
+                    hash_array.copy_from_slice(hash.as_slice());
+                    hashes.push(hash_array);
+                }
+
+                if hashes.len() == entries_per_tile as usize {
+                    // Only store if all child tiles are full
+                    let mut all_children_full = true;
+
+                    for position in start_position..end_position {
+                        if level == 0 {
+                            // Level 0 has no children, so all are considered "full"
+                            break;
+                        }
+
+                        let child_level = level - 1;
+                        let child_subtree_size = 256u64.pow(child_level as u32);
+                        let child_total_positions = tree_size.div_ceil(child_subtree_size);
+
+                        // Check if this child tile would be full
+                        let child_tile_start = position * 256;
+                        let child_tile_end =
+                            std::cmp::min(child_tile_start + 256, child_total_positions);
+                        let child_tile_size = child_tile_end - child_tile_start;
+
+                        if child_tile_size < 256 {
+                            all_children_full = false;
+                            break;
+                        }
+                    }
+
+                    if all_children_full {
+                        let tile = crate::types::tiles::Tile::new(hashes);
+                        let tile_bytes = tile.to_bytes();
+                        batch.put(key, &tile_bytes);
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn prove_consistency_between(
@@ -615,12 +739,18 @@ where
         batch.put(Self::leaf_key(num_leaves), &leaf_bytes);
 
         let new_leaf_idx = LeafIdx::new(num_leaves);
-        self.recalculate_path_batch(&mut batch, new_leaf_idx, &new_val, num_leaves + 1)
+        let computed_hashes = self
+            .recalculate_path_batch(&mut batch, new_leaf_idx, &new_val, num_leaves + 1)
             .await?;
 
         batch.put(META_KEY, (num_leaves + 1).to_be_bytes());
         batch.put(COMMITTED_SIZE_KEY, (num_leaves + 1).to_be_bytes());
 
+        // Precompute tiles in the same batch for atomicity
+        self.precompute_tiles_batch(&mut batch, num_leaves + 1, &computed_hashes)
+            .await?;
+
+        // Single atomic write for both tree updates and tiles
         self.db.write(batch).await?;
 
         Ok(())
@@ -632,7 +762,7 @@ where
         leaf_idx: LeafIdx,
         leaf_val: &T,
         num_leaves: u64,
-    ) -> Result<(), SlateDbTreeError> {
+    ) -> Result<std::collections::BTreeMap<u64, digest::Output<H>>, SlateDbTreeError> {
         let mut cur_idx: InternalIdx = leaf_idx.into();
         let leaf_hash = leaf_hash::<H, _>(leaf_val);
 
@@ -686,7 +816,7 @@ where
             );
         }
 
-        Ok(())
+        Ok(computed_hashes)
     }
 
     pub async fn root(&self) -> Result<RootHash<H>, SlateDbTreeError> {
@@ -1189,6 +1319,71 @@ mod tests {
             still_not_at_v2,
             digest::Output::<Sha256>::default(),
             "Node should still not exist at version 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tile_precomputation() {
+        let db = create_test_db().await;
+        let tree: SlateDbBackedTree<Sha256, TestLeaf> = SlateDbBackedTree::new(db).await.unwrap();
+
+        // Add leaves to create a partial tile (less than 256)
+        let mut leaves = vec![];
+        for i in 0..100 {
+            leaves.push(TestLeaf { data: vec![i] });
+        }
+
+        tree.batch_push_with_data(leaves, vec![]).await.unwrap();
+
+        // With 100 leaves, level 0 tile 0 should NOT exist (it's partial)
+        let tile_0_0 = tree.get_tile(0, 0).await.unwrap();
+        assert!(tile_0_0.is_none(), "Partial tile should not be precomputed");
+
+        // Add more leaves to complete the tile (256 total)
+        let mut more_leaves = vec![];
+        for i in 100..256 {
+            more_leaves.push(TestLeaf {
+                data: vec![i as u8],
+            });
+        }
+
+        tree.batch_push_with_data(more_leaves, vec![])
+            .await
+            .unwrap();
+
+        // Now level 0 tile 0 should exist with exactly 256 hashes
+        let tile_0_0 = tree.get_tile(0, 0).await.unwrap();
+        assert!(tile_0_0.is_some(), "Full tile should be precomputed");
+        assert_eq!(
+            tile_0_0.unwrap().len(),
+            256 * 32,
+            "Tile should contain 256 hashes"
+        );
+
+        // Add one more batch to create another full tile
+        let mut batch3 = vec![];
+        for i in 256..512 {
+            batch3.push(TestLeaf {
+                data: vec![i as u8],
+            });
+        }
+
+        tree.batch_push_with_data(batch3, vec![]).await.unwrap();
+
+        // Level 0 tile 1 should now exist
+        let tile_0_1 = tree.get_tile(0, 1).await.unwrap();
+        assert!(tile_0_1.is_some(), "Second full tile should be precomputed");
+        assert_eq!(
+            tile_0_1.unwrap().len(),
+            256 * 32,
+            "Second tile should contain 256 hashes"
+        );
+
+        // Level 1 tile 0 should NOT exist (it's partial with only 2 entries)
+        let tile_1_0 = tree.get_tile(1, 0).await.unwrap();
+        assert!(
+            tile_1_0.is_none(),
+            "Partial level 1 tile should not be precomputed"
         );
     }
 

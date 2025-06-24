@@ -73,6 +73,17 @@ impl StorageBackedMerkleTree {
         })
     }
 
+    /// Get a precomputed merkle tile
+    pub async fn get_tile(&self, level: u8, index: u64) -> Result<Option<Vec<u8>>> {
+        let tree = self.tree.as_ref();
+        tree.get_tile(level, index).await.map_err(|e| {
+            CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
+                "Failed to get tile: {:?}",
+                e
+            )))
+        })
+    }
+
     pub async fn batch_push_with_data(
         &self,
         cert_data_vec: Vec<Vec<u8>>,

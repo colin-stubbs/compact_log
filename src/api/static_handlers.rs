@@ -113,13 +113,62 @@ pub async fn get_tile(
     })?;
     let tree_size = committed_root.num_leaves();
 
-    let tile = generate_merkle_tile(&state, level, tile_index, tree_size, width)
-        .await
-        .inspect_err(|_| {
-            metrics::STATIC_CT_TILE_REQUESTS
-                .with_label_values(&["merkle", "error"])
-                .inc();
-        })?;
+    let is_partial = width.is_some();
+
+    let tile_data = if is_partial {
+        tracing::debug!(
+            "Generating partial tile on-demand for level={} index={} width={:?}",
+            level,
+            tile_index,
+            width
+        );
+        let tile = generate_merkle_tile(&state, level, tile_index, tree_size, width)
+            .await
+            .inspect_err(|_| {
+                metrics::STATIC_CT_TILE_REQUESTS
+                    .with_label_values(&["merkle", "error"])
+                    .inc();
+            })?;
+        tile.to_bytes()
+    } else {
+        match state.merkle_tree.get_tile(level, tile_index).await {
+            Ok(Some(data)) => {
+                tracing::debug!(
+                    "Serving precomputed tile for level={} index={}",
+                    level,
+                    tile_index
+                );
+                data
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    "Full tile not found for level={} index={}, generating on demand",
+                    level,
+                    tile_index
+                );
+                let tile = generate_merkle_tile(&state, level, tile_index, tree_size, None)
+                    .await
+                    .inspect_err(|_| {
+                        metrics::STATIC_CT_TILE_REQUESTS
+                            .with_label_values(&["merkle", "error"])
+                            .inc();
+                    })?;
+                tile.to_bytes()
+            }
+            Err(e) => {
+                tracing::error!("Failed to get precomputed tile: {}", e);
+                metrics::STATIC_CT_TILE_REQUESTS
+                    .with_label_values(&["merkle", "error"])
+                    .inc();
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(ErrorResponse {
+                        error: "Failed to retrieve tile".to_string(),
+                    }),
+                ));
+            }
+        }
+    };
 
     if level == 1 && tile_index == 3 {
         tracing::debug!(
@@ -128,8 +177,6 @@ pub async fn get_tile(
             hex::encode(&committed_root.as_bytes()[..8])
         );
     }
-
-    let tile_data = tile.to_bytes();
 
     metrics::STATIC_CT_TILE_SIZE_BYTES
         .with_label_values(&["merkle"])
@@ -166,36 +213,17 @@ async fn generate_merkle_tile(
     tree_size: u64,
     requested_width: Option<u16>,
 ) -> Result<Tile, (StatusCode, axum::Json<ErrorResponse>)> {
-    let nodes_per_tile = 256u64;
+    let subtree_size = 256u64.pow(level as u32);
+    let entries_per_tile = 256u64;
 
-    let max_hashes = if let Some(w) = requested_width {
-        w as u64
-    } else {
-        // Calculate width according to spec: floor(s / 256**l) mod 256
-        let subtree_size = 256u64.pow(level as u32);
+    let full_subtrees = tree_size / subtree_size;
+    let has_partial_subtree = (tree_size % subtree_size) > 0;
+    let total_positions = full_subtrees + if has_partial_subtree { 1 } else { 0 };
 
-        // Calculate total positions, including partial subtrees
-        // If there are remaining leaves after the last full subtree, we have one more position
-        let full_subtrees = tree_size / subtree_size;
-        let has_partial_subtree = (tree_size % subtree_size) > 0;
-        let total_positions = full_subtrees + if has_partial_subtree { 1 } else { 0 };
+    let start_position = tile_index * entries_per_tile;
+    let end_position = std::cmp::min(start_position + entries_per_tile, total_positions);
 
-        let full_tiles = total_positions / 256;
-        let partial_width = total_positions % 256;
-
-        if tile_index < full_tiles {
-            // This is a full tile
-            nodes_per_tile
-        } else if tile_index == full_tiles && partial_width > 0 {
-            // This is the partial tile
-            partial_width
-        } else {
-            // This tile doesn't exist
-            0
-        }
-    };
-
-    if max_hashes == 0 {
+    if start_position >= total_positions {
         return Err((
             StatusCode::NOT_FOUND,
             axum::Json(ErrorResponse {
@@ -204,11 +232,16 @@ async fn generate_merkle_tile(
         ));
     }
 
+    let max_hashes = if let Some(w) = requested_width {
+        std::cmp::min(w as u64, end_position - start_position)
+    } else {
+        end_position - start_position
+    };
+
     let tasks: Vec<_> = (0..max_hashes)
         .map(|i| {
-            let position_in_tile = i;
-            let subtree_size = 256u64.pow(level as u32);
-            let start_leaf = (tile_index * 256 + position_in_tile) * subtree_size;
+            let position = start_position + i;
+            let start_leaf = position * subtree_size;
             let merkle_tree = state.merkle_tree.clone();
 
             tokio::spawn(async move {
@@ -216,15 +249,7 @@ async fn generate_merkle_tile(
                     Ok(None)
                 } else {
                     let end_leaf = std::cmp::min(start_leaf + subtree_size, tree_size);
-                    let actual_subtree_size = end_leaf - start_leaf;
                     let subtree_root_idx = compute_subtree_root(start_leaf, end_leaf);
-
-                    if actual_subtree_size < subtree_size {
-                        tracing::debug!(
-                            "Computing incomplete subtree: level={} tile={} pos={} start={} end={} size={} idx={}",
-                            level, tile_index, position_in_tile, start_leaf, end_leaf, actual_subtree_size, subtree_root_idx.as_u64()
-                        );
-                    }
 
                     let hash = merkle_tree
                         .get_node_hash_at_version(subtree_root_idx.as_u64(), tree_size)
@@ -574,7 +599,7 @@ CsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=
         assert_eq!(lines.len(), 5);
         assert_eq!(lines[0], "example.com/log");
         assert_eq!(lines[1], "12345");
-        assert!(lines[2].len() > 0);
+        assert!(!lines[2].is_empty());
         assert_eq!(lines[3], "");
         assert!(lines[4].starts_with("— example.com/log "));
 
@@ -637,7 +662,7 @@ CsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=
         for (tree_size, level, expected_width) in test_cases {
             let subtree_size = 256u64.pow(level as u32);
             let total_positions = tree_size / subtree_size;
-            let partial_width = (total_positions % 256) as u64;
+            let partial_width = total_positions % 256;
 
             assert_eq!(
                 partial_width, expected_width,

@@ -238,7 +238,7 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(&origin);
         hasher.update(b"\n");
-        hasher.update(&[0x05]);
+        hasher.update([0x05]);
         hasher.update(&log_id);
         let expected_hash = hasher.finalize();
 
