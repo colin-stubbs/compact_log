@@ -11,7 +11,7 @@ lto = true
 opt-level = 3
 
 [dependencies]
-slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "76476ca52dc3661911086d2a0a5123f8a50a1b6b", features = [
+slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "1535fc1b985b1a989ce4d1a3c6f9234a28920694", features = [
     "lz4",
     "azure",
 ] }
@@ -45,10 +45,11 @@ futures = "0.3"
 moka = { version = "0.12", features = ["future"] }
 openssl = { version = "0.10", features = ["vendored"] }
 csv = "1.3"
-reqwest = { version = "0.12", features = ["rustls-tls"] }
+reqwest = { version = "0.12", features = ["rustls-tls", "json"] }
 prometheus = { version = "0.14", features = ["process"] }
 lazy_static = "1.4"
 flate2 = "1.1"
+num_cpus = "1.16"
 
 [dev-dependencies]
 subtle = "2.5"
