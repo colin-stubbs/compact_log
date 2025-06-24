@@ -68,6 +68,9 @@ where
     // Cache for frequently accessed upper tree nodes
     // Key: (node index, version), Value: node hash
     node_cache: Option<Cache<(u64, u64), Vec<u8>>>,
+    // Cache for tile existence checks
+    // Key: (level, tile_index), Value: exists (true) or not
+    tile_cache: Option<Cache<(u8, u64), bool>>,
     // Write lock to ensure write operations are serialized
     write_lock: Arc<Mutex<()>>,
 }
@@ -101,15 +104,16 @@ where
     }
 
     pub async fn new(db: Arc<Db>) -> Result<Self, SlateDbTreeError> {
-        let cache = Cache::builder()
-            .max_capacity(10_000_000) // 10M entries for trees up to 1B entries
-            .build();
+        let node_cache = Cache::builder().max_capacity(10_000_000).build();
+
+        let tile_cache = Cache::builder().max_capacity(100_000).build();
 
         let tree = Self {
             db,
             _phantom_h: core::marker::PhantomData,
             _phantom_t: core::marker::PhantomData,
-            node_cache: Some(cache),
+            node_cache: Some(node_cache),
+            tile_cache: Some(tile_cache),
             write_lock: Arc::new(Mutex::new(())),
         };
 
@@ -386,8 +390,27 @@ where
             let existence_futures: Vec<_> = tiles_to_compute
                 .iter()
                 .map(|(tile_index, _, _)| {
-                    let key = Self::tile_key(level, *tile_index);
-                    async move { self.db.get(&key).await }
+                    let cache_key = (level, *tile_index);
+                    async move {
+                        if let Some(ref cache) = self.tile_cache {
+                            if let Some(exists) = cache.get(&cache_key).await {
+                                return Ok(exists);
+                            }
+                        }
+
+                        let key = Self::tile_key(level, *tile_index);
+                        let exists = match self.db.get(&key).await {
+                            Ok(Some(_)) => true,
+                            Ok(None) => false,
+                            Err(e) => return Err(SlateDbTreeError::DbError(e)),
+                        };
+
+                        if let Some(ref cache) = self.tile_cache {
+                            cache.insert(cache_key, exists).await;
+                        }
+
+                        Ok(exists)
+                    }
                 })
                 .collect();
 
@@ -396,11 +419,9 @@ where
             let tiles_to_process: Vec<_> = tiles_to_compute
                 .into_iter()
                 .zip(existence_results.into_iter())
-                .filter_map(|(tile_data, exists_result)| {
-                    match exists_result {
-                        Ok(Some(_)) => None, // Tile already exists
-                        _ => Some(tile_data),
-                    }
+                .filter_map(|(tile_data, exists_result)| match exists_result {
+                    Ok(true) => None,
+                    _ => Some(tile_data),
                 })
                 .collect();
 
@@ -423,11 +444,9 @@ where
                     }
                 }
 
-                // Fetch all missing hashes concurrently
                 let fetched_hashes = futures::future::try_join_all(hash_futures).await?;
                 let mut fetched_iter = fetched_hashes.into_iter();
 
-                // Build the hashes vector
                 let mut hashes = Vec::with_capacity(entries_per_tile as usize);
                 for position in start_position..end_position {
                     let start_leaf = position * subtree_size;
@@ -480,6 +499,10 @@ where
                         let tile_bytes = tile.to_bytes();
                         let key = Self::tile_key(level, tile_index);
                         batch.put(key, &tile_bytes);
+
+                        if let Some(ref cache) = self.tile_cache {
+                            cache.insert((level, tile_index), true).await;
+                        }
                     }
                 }
             }
