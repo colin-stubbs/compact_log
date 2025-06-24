@@ -364,6 +364,8 @@ where
 
             let num_tiles = total_positions.div_ceil(entries_per_tile);
 
+            let mut tiles_to_compute = Vec::new();
+
             for tile_index in 0..num_tiles {
                 let start_position = tile_index * entries_per_tile;
                 let end_position =
@@ -373,18 +375,60 @@ where
                     continue;
                 }
 
-                let key = Self::tile_key(level, tile_index);
-                if let Ok(Some(_)) = self.db.get(&key).await {
-                    continue;
-                }
-
                 let tile_size = end_position - start_position;
                 if tile_size < entries_per_tile {
                     continue;
                 }
 
-                let mut hashes = Vec::with_capacity(entries_per_tile as usize);
+                tiles_to_compute.push((tile_index, start_position, end_position));
+            }
 
+            let existence_futures: Vec<_> = tiles_to_compute
+                .iter()
+                .map(|(tile_index, _, _)| {
+                    let key = Self::tile_key(level, *tile_index);
+                    async move { self.db.get(&key).await }
+                })
+                .collect();
+
+            let existence_results = futures::future::join_all(existence_futures).await;
+
+            let tiles_to_process: Vec<_> = tiles_to_compute
+                .into_iter()
+                .zip(existence_results.into_iter())
+                .filter_map(|(tile_data, exists_result)| {
+                    match exists_result {
+                        Ok(Some(_)) => None, // Tile already exists
+                        _ => Some(tile_data),
+                    }
+                })
+                .collect();
+
+            for (tile_index, start_position, end_position) in tiles_to_process {
+                let mut hash_futures = Vec::new();
+
+                for position in start_position..end_position {
+                    let start_leaf = position * subtree_size;
+                    if start_leaf >= tree_size {
+                        break;
+                    }
+
+                    let end_leaf = std::cmp::min(start_leaf + subtree_size, tree_size);
+                    let subtree_root_idx = compute_subtree_root(start_leaf, end_leaf);
+
+                    if !computed_hashes.contains_key(&subtree_root_idx.as_u64()) {
+                        hash_futures.push(
+                            self.get_node_hash_at_version(subtree_root_idx.as_u64(), tree_size),
+                        );
+                    }
+                }
+
+                // Fetch all missing hashes concurrently
+                let fetched_hashes = futures::future::try_join_all(hash_futures).await?;
+                let mut fetched_iter = fetched_hashes.into_iter();
+
+                // Build the hashes vector
+                let mut hashes = Vec::with_capacity(entries_per_tile as usize);
                 for position in start_position..end_position {
                     let start_leaf = position * subtree_size;
                     if start_leaf >= tree_size {
@@ -397,9 +441,9 @@ where
                     let hash = if let Some(hash) = computed_hashes.get(&subtree_root_idx.as_u64()) {
                         hash.clone()
                     } else {
-                        self.get_node_hash_at_version(subtree_root_idx.as_u64(), tree_size)
-                            .await?
+                        fetched_iter.next().unwrap()
                     };
+
                     let mut hash_array = [0u8; 32];
                     hash_array.copy_from_slice(hash.as_slice());
                     hashes.push(hash_array);
@@ -434,6 +478,7 @@ where
                     if all_children_full {
                         let tile = crate::types::tiles::Tile::new(hashes);
                         let tile_bytes = tile.to_bytes();
+                        let key = Self::tile_key(level, tile_index);
                         batch.put(key, &tile_bytes);
                     }
                 }
