@@ -11,7 +11,7 @@ lto = true
 opt-level = 3
 
 [dependencies]
-slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "63b08992dd06b342b7b6589175c5c53d11d62951", features = [
+slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "5aaa4c8e879f82b19251a0b473666e241433334c", features = [
     "lz4",
     "azure",
 ] }
