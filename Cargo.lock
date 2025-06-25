@@ -2730,7 +2730,7 @@ dependencies = [
 [[package]]
 name = "slatedb"
 version = "0.6.1"
-source = "git+https://github.com/Barre/slatedb.git?rev=1535fc1b985b1a989ce4d1a3c6f9234a28920694#1535fc1b985b1a989ce4d1a3c6f9234a28920694"
+source = "git+https://github.com/Barre/slatedb.git?rev=63b08992dd06b342b7b6589175c5c53d11d62951#63b08992dd06b342b7b6589175c5c53d11d62951"
 dependencies = [
  "async-trait",
  "atomic",
