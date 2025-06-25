@@ -2,3 +2,4 @@ Config.toml
 keys
 target
 trusted_roots/*.pem
+benchmark/certs

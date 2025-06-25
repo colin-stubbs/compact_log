@@ -1,0 +1,13 @@
+[package]
+name = "compactlog-benchmark"
+version = "0.1.0"
+edition = "2021"
+description = "Generate certificates for the wrk lua benchmark script"
+
+[[bin]]
+name = "gen_certs"
+path = "src/gen_certs.rs"
+
+[dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+rand = "0.8"
