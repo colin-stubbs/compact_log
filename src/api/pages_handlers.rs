@@ -79,10 +79,7 @@ pub async fn get_page(
             })?;
 
             // Convert chain hashes to the expected format
-            let issuer_hashes = entry
-                .chain_hashes
-                .clone()
-                .unwrap_or_default();
+            let issuer_hashes = entry.chain_hashes.clone().unwrap_or_default();
 
             page.add_entry(timestamped_entry, issuer_hashes);
         } else {
