@@ -424,7 +424,7 @@ async fn initialize_storage(
             compacted_options: Some(garbage_collector_directory_options),
         }),
         compactor_options: Some(CompactorOptions {
-            max_concurrent_compactions: 8,
+            max_concurrent_compactions: 64,
             ..default::Default::default()
         }),
         object_store_cache_options: match cache_config {
