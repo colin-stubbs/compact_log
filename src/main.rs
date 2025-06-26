@@ -417,7 +417,7 @@ async fn initialize_storage(
     };
 
     let db_options = Settings {
-        compression_codec: Some(CompressionCodec::Lz4),
+        // compression_codec: Some(CompressionCodec::Lz4),
         garbage_collector_options: Some(GarbageCollectorOptions {
             wal_options: Some(garbage_collector_directory_options),
             manifest_options: Some(garbage_collector_directory_options),
