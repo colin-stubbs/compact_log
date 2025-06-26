@@ -4,11 +4,6 @@ version = "0.1.0"
 edition = "2021"
 description = "A compact log server for storing and serving CT logs."
 
-[profile.release]
-strip = true
-codegen-units = 1
-lto = true
-opt-level = 3
 
 [dependencies]
 slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "63b08992dd06b342b7b6589175c5c53d11d62951", features = [
@@ -18,6 +13,7 @@ slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "63b08992dd06b34
 postcard = { version = "1.0", features = ["alloc", "use-std"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
+tower-http = { version = "0.6", features = ["compression-full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytes = "1"

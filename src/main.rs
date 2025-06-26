@@ -84,6 +84,8 @@ struct AppConfig {
 struct ServerConfig {
     bind_addr: String,
     base_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    static_endpoint: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -316,6 +318,7 @@ async fn initialize_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         server: ServerConfig {
             bind_addr: "0.0.0.0:8080".to_string(),
             base_url: "http://localhost:8080/".to_string(),
+            static_endpoint: None,
         },
         storage: StorageConfig {
             provider: "local".to_string(),

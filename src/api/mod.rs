@@ -9,6 +9,7 @@ use prometheus::{Encoder, TextEncoder};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tower_http::compression::CompressionLayer;
 
 use crate::{
     merkle_storage::StorageBackedMerkleTree,
@@ -18,6 +19,7 @@ use crate::{
 };
 
 pub mod handlers;
+pub mod pages_handlers;
 pub mod static_handlers;
 
 pub struct ApiState {
@@ -100,10 +102,21 @@ pub fn create_router(state: ApiState) -> Router {
         )
         .route("/issuer/{fingerprint}", get(static_handlers::get_issuer))
         .route("/inclusion_request.json", get(handlers::inclusion_request))
+        // RFC 6962 Pages Extension endpoints
+        .route("/ct-pages/v1/discover", get(pages_handlers::discover))
+        .route(
+            "/ct-pages/v1/page/{page_number}",
+            get(pages_handlers::get_page),
+        )
+        .route(
+            "/ct-pages/v1/certificate/{hash}",
+            get(pages_handlers::get_certificate),
+        )
         .route("/health", get(health_check))
         // Prometheus metrics endpoint
         .route("/metrics", get(metrics_handler))
         .layer(middleware::from_fn(metrics_middleware))
+        .layer(CompressionLayer::new())
         .with_state(Arc::new(state))
 }
 

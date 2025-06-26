@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use x509_cert::Certificate;
 
+pub mod pages;
 pub mod sct;
 pub mod sct_extensions;
 pub mod signed_note;
