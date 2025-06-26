@@ -4,7 +4,7 @@ use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use p256::SecretKey;
 use serde::{Deserialize, Serialize};
 use slatedb::config::{
-    CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
     ObjectStoreCacheOptions,
 };
 use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
