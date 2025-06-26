@@ -425,7 +425,6 @@ async fn initialize_storage(
         }),
         compactor_options: Some(CompactorOptions {
             max_concurrent_compactions: 8,
-            max_sst_size: 258 * 1024 * 1024,
             ..default::Default::default()
         }),
         object_store_cache_options: match cache_config {
