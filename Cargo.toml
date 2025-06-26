@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "A compact log server for storing and serving CT logs."
 
+[profile.release]
+strip = true
+lto = "fat"
+opt-level = 3
+codegen-units = 1
 
 [dependencies]
 slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "63b08992dd06b342b7b6589175c5c53d11d62951", features = [
