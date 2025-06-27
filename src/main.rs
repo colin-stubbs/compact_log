@@ -4,7 +4,7 @@ use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use p256::SecretKey;
 use serde::{Deserialize, Serialize};
 use slatedb::config::{
-    CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
     ObjectStoreCacheOptions,
 };
 use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
@@ -423,7 +423,7 @@ async fn initialize_storage(
     };
 
     let db_options = Settings {
-        // compression_codec: Some(CompressionCodec::Lz4),
+        compression_codec: Some(CompressionCodec::Lz4),
         garbage_collector_options: Some(GarbageCollectorOptions {
             wal_options: Some(garbage_collector_directory_options),
             manifest_options: Some(garbage_collector_directory_options),
