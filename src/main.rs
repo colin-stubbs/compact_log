@@ -30,6 +30,7 @@ mod merkle_storage;
 mod merkle_tree;
 mod metrics;
 mod oids;
+mod rate_limiter;
 mod storage;
 mod types;
 mod validation;
@@ -39,7 +40,8 @@ mod test_utils;
 
 use api::{create_router, ApiState};
 use ccadb::{CcadbWorker, RootCertificateStore};
-use storage::{BatchConfig, CtStorage};
+use rate_limiter::ReadRateLimiter;
+use storage::{BatchConfig, CtStorage, RateLimitedDb};
 use types::LogId;
 use validation::{CcadbEnvironment, Rfc6962ValidationConfig, Rfc6962Validator};
 
@@ -161,17 +163,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let batch_config = BatchConfig::default();
 
+    // Create rate limiter for warmup period (5 concurrent reads for 30 seconds)
+    let read_rate_limiter = ReadRateLimiter::new(5, 30);
+    let rate_limited_db = RateLimitedDb::new(storage.clone(), Some(read_rate_limiter.clone()));
+
     info!("Creating merkle tree...");
     info!("DB initialized, attempting to create StorageBackedMerkleTree");
 
-    let merkle_tree = merkle_storage::StorageBackedMerkleTree::new(storage.clone()).await?;
+    let merkle_tree = merkle_storage::StorageBackedMerkleTree::new(rate_limited_db.clone()).await?;
     info!("StorageBackedMerkleTree created successfully");
 
     info!("Merkle tree created");
 
     info!("Creating CT storage...");
 
-    let ct_storage = CtStorage::new(storage, batch_config, merkle_tree.clone()).await?;
+    let ct_storage = CtStorage::new(rate_limited_db, batch_config, merkle_tree.clone()).await?;
 
     info!("CT storage created");
 

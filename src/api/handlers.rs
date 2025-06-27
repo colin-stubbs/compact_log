@@ -608,6 +608,7 @@ pub async fn get_entries(
         .observe(count as f64);
 
     let storage = state.storage.clone();
+
     let futures: Vec<_> = (params.start..=end)
         .map(|i| {
             let storage = storage.clone();

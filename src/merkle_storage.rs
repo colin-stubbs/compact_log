@@ -1,7 +1,7 @@
 use crate::merkle_tree::{ConsistencyProof, InclusionProof, RootHash, SlateDbBackedTree};
+use crate::storage::RateLimitedDb;
 use crate::types::{CtError, Result};
 use sha2::Sha256;
-use slatedb::Db;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -41,7 +41,7 @@ pub struct StorageBackedMerkleTree {
 }
 
 impl StorageBackedMerkleTree {
-    pub async fn new(db: Arc<Db>) -> Result<Self> {
+    pub async fn new(db: RateLimitedDb) -> Result<Self> {
         let tree = SlateDbBackedTree::new(db).await.map_err(|e| {
             CtError::Storage(crate::storage::StorageError::InvalidFormat(format!(
                 "Failed to create SlateDbBackedTree: {:?}",

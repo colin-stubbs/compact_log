@@ -4,11 +4,13 @@ use crate::validation::tbs_extractor::TbsExtractor;
 use bytes::Bytes;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use slatedb::Db;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Mutex};
+
+mod rate_limited_db;
+pub use rate_limited_db::RateLimitedDb;
 
 #[derive(Error, Debug)]
 pub enum StorageError {
@@ -100,7 +102,7 @@ impl KeyPrefix {
 /// Storage backend for Certificate Transparency log using SlateDB with batching
 #[derive(Clone)]
 pub struct CtStorage {
-    pub(crate) db: Arc<Db>,
+    pub(crate) db: RateLimitedDb,
     batch_sender: mpsc::Sender<BatchEntry>,
 }
 
@@ -129,7 +131,7 @@ impl CtStorage {
     }
 
     pub async fn new(
-        db: Arc<Db>,
+        db: RateLimitedDb,
         config: BatchConfig,
         merkle_tree: StorageBackedMerkleTree,
     ) -> Result<Self> {
@@ -994,6 +996,7 @@ mod tests {
     use crate::types::{sct::SctVersion, LogEntryType, LogId};
     use chrono::{TimeZone, Utc};
     use object_store::memory::InMemory;
+    use slatedb::Db;
 
     // Helper functions for creating test data
     fn create_test_log_entry(index: u64) -> LogEntry {
@@ -1056,8 +1059,11 @@ mod tests {
     async fn create_test_storage(config: BatchConfig) -> (CtStorage, StorageBackedMerkleTree) {
         let object_store = Arc::new(InMemory::new());
         let db = Arc::new(Db::open("test", object_store).await.unwrap());
-        let merkle_tree = StorageBackedMerkleTree::new(db.clone()).await.unwrap();
-        let storage = CtStorage::new(db.clone(), config, merkle_tree.clone())
+        let rate_limited_db = RateLimitedDb::new(db.clone(), None); // No rate limiting for tests
+        let merkle_tree = StorageBackedMerkleTree::new(rate_limited_db.clone())
+            .await
+            .unwrap();
+        let storage = CtStorage::new(rate_limited_db, config, merkle_tree.clone())
             .await
             .unwrap();
 

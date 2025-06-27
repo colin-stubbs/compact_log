@@ -6,9 +6,10 @@ use crate::merkle_tree::{
         HashableLeaf, InclusionProof, InternalIdx, LeafIdx, RootHash,
     },
 };
+use crate::storage::RateLimitedDb;
 use digest::Digest;
 use moka::future::Cache;
-use slatedb::{Db, WriteBatch};
+use slatedb::WriteBatch;
 use std::{fmt, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -62,7 +63,7 @@ where
     H: Digest,
     T: HashableLeaf,
 {
-    db: Arc<Db>,
+    db: RateLimitedDb,
     _phantom_h: core::marker::PhantomData<H>,
     _phantom_t: core::marker::PhantomData<T>,
     // Cache for frequently accessed upper tree nodes
@@ -129,7 +130,7 @@ where
         futures::future::try_join_all(futures).await
     }
 
-    pub async fn new(db: Arc<Db>) -> Result<Self, SlateDbTreeError> {
+    pub async fn new(db: RateLimitedDb) -> Result<Self, SlateDbTreeError> {
         let node_cache = Cache::builder().max_capacity(10_000_000).build();
 
         let tile_cache = Cache::builder().max_capacity(100_000).build();
@@ -193,9 +194,7 @@ where
     }
 
     async fn set_num_leaves(&self, num_leaves: u64) -> Result<(), SlateDbTreeError> {
-        self.hashed_put(META_KEY, &num_leaves.to_be_bytes())
-            .await
-            .map_err(Into::into)
+        self.hashed_put(META_KEY, &num_leaves.to_be_bytes()).await
     }
 
     pub async fn len(&self) -> Result<u64, SlateDbTreeError> {
@@ -379,7 +378,7 @@ where
             .await?;
 
         // Single atomic write for both tree updates and tiles
-        self.db.write(batch).await?;
+        self.db.write_batch(batch).await?;
 
         Ok(starting_index)
     }
@@ -855,7 +854,7 @@ where
             .await?;
 
         // Single atomic write for both tree updates and tiles
-        self.db.write(batch).await?;
+        self.db.write_batch(batch).await?;
 
         Ok(())
     }
@@ -990,7 +989,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::RateLimitedDb;
     use sha2::Sha256;
+    use slatedb::Db;
 
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     struct TestLeaf {
@@ -1003,14 +1004,15 @@ mod tests {
         }
     }
 
-    async fn create_test_db() -> Arc<Db> {
+    async fn create_test_db() -> RateLimitedDb {
         // Use in-memory mode for testing
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let db = Db::builder(object_store::path::Path::from("/test"), object_store)
             .build()
             .await
             .unwrap();
-        Arc::new(db)
+        // Create RateLimitedDb without rate limiting for tests
+        RateLimitedDb::new(Arc::new(db), None)
     }
 
     #[tokio::test]
