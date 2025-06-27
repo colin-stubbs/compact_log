@@ -114,6 +114,20 @@ impl BatchConfig {
 }
 
 impl CtStorage {
+    /// Hash a key using SHA-256 to distribute keys evenly across keyspace
+    fn hash_key(key: &[u8]) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(key);
+        hasher.finalize().to_vec()
+    }
+
+    /// Wrapper for db.get that hashes the key first
+    async fn hashed_get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        let hashed_key = Self::hash_key(key);
+        Ok(self.db.get(&hashed_key).await?)
+    }
+
     pub async fn new(
         db: Arc<Db>,
         config: BatchConfig,
@@ -520,8 +534,8 @@ impl CtStorage {
                 };
 
                 // Store deduplicated entry
-                additional_data.push((entry_key, entry_data.clone()));
-                additional_data.push((hash_key, index.to_be_bytes().to_vec()));
+                additional_data.push((entry_key.clone(), entry_data.clone()));
+                additional_data.push((hash_key.clone(), index.to_be_bytes().to_vec()));
                 additional_data.push((cert_sct_key, sct_data));
             }
 
@@ -668,7 +682,7 @@ impl CtStorage {
     }
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        Ok(self.db.get(key).await?)
+        self.hashed_get(key).await
     }
 
     /// Find index by hash
