@@ -82,6 +82,7 @@ const VERSIONED_NODE_PREFIX: &[u8] = b"vnode:";
 const COMMITTED_SIZE_KEY: &[u8] = b"committed_size";
 const NODE_LATEST_VERSION_PREFIX: &[u8] = b"nver:";
 const TILE_PREFIX: &[u8] = b"tile:";
+const LAST_PRECOMPUTED_SIZE_KEY: &[u8] = b"last_precomputed_size";
 
 impl<H, T> SlateDbBackedTree<H, T>
 where
@@ -216,6 +217,36 @@ where
                 Ok(0)
             }
         }
+    }
+
+    /// Get the last tree size at which tiles were precomputed
+    async fn get_last_precomputed_size(&self) -> Result<u64, SlateDbTreeError> {
+        match self.hashed_get(LAST_PRECOMPUTED_SIZE_KEY).await? {
+            Some(bytes) => {
+                let bytes_ref: &[u8] = bytes.as_ref();
+                let bytes_array: [u8; 8] = bytes_ref.try_into().map_err(|_| {
+                    SlateDbTreeError::EncodingError("Invalid last precomputed size".into())
+                })?;
+                Ok(u64::from_be_bytes(bytes_array))
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// Check if a tile would be full at a given tree size
+    fn is_tile_full_at_size(level: u8, tile_index: u64, tree_size: u64) -> bool {
+        let subtree_size = 256u64.pow(level as u32);
+        let entries_per_tile = 256u64;
+
+        // Calculate the range of positions this tile covers
+        let start_position = tile_index * entries_per_tile;
+        let end_position = start_position + entries_per_tile;
+
+        // A tile is full if all 256 positions have complete subtrees
+        // This means the last position's subtree must END at or before tree_size
+        let last_position_end = end_position * subtree_size;
+
+        last_position_end <= tree_size
     }
 
     /// Generate key for storing a precomputed merkle tile
@@ -389,6 +420,8 @@ where
         tree_size: u64,
         computed_hashes: &std::collections::BTreeMap<u64, digest::Output<H>>,
     ) -> Result<(), SlateDbTreeError> {
+        let last_precomputed_size = self.get_last_precomputed_size().await?;
+
         for level in 0..=5u8 {
             let subtree_size = 256u64.pow(level as u32);
             let entries_per_tile = 256u64;
@@ -399,7 +432,7 @@ where
 
             let num_tiles = total_positions.div_ceil(entries_per_tile);
 
-            let mut tiles_to_compute = Vec::new();
+            let mut tiles_to_process = Vec::new();
 
             for tile_index in 0..num_tiles {
                 let start_position = tile_index * entries_per_tile;
@@ -412,49 +445,18 @@ where
 
                 let tile_size = end_position - start_position;
                 if tile_size < entries_per_tile {
+                    // Skip partial tiles
                     continue;
                 }
 
-                tiles_to_compute.push((tile_index, start_position, end_position));
+                if Self::is_tile_full_at_size(level, tile_index, last_precomputed_size) {
+                    // This tile was already full at the last precomputed size,
+                    // so it must exist and we can skip it
+                    continue;
+                }
+
+                tiles_to_process.push((tile_index, start_position, end_position));
             }
-
-            let existence_futures: Vec<_> = tiles_to_compute
-                .iter()
-                .map(|(tile_index, _, _)| {
-                    let cache_key = (level, *tile_index);
-                    async move {
-                        if let Some(ref cache) = self.tile_cache {
-                            if let Some(exists) = cache.get(&cache_key).await {
-                                return Ok(exists);
-                            }
-                        }
-
-                        let key = Self::tile_key(level, *tile_index);
-                        let exists = match self.hashed_get(&key).await {
-                            Ok(Some(_)) => true,
-                            Ok(None) => false,
-                            Err(e) => return Err(e),
-                        };
-
-                        if let Some(ref cache) = self.tile_cache {
-                            cache.insert(cache_key, exists).await;
-                        }
-
-                        Ok(exists)
-                    }
-                })
-                .collect();
-
-            let existence_results = futures::future::join_all(existence_futures).await;
-
-            let tiles_to_process: Vec<_> = tiles_to_compute
-                .into_iter()
-                .zip(existence_results.into_iter())
-                .filter_map(|(tile_data, exists_result)| match exists_result {
-                    Ok(true) => None,
-                    _ => Some(tile_data),
-                })
-                .collect();
 
             for (tile_index, start_position, end_position) in tiles_to_process {
                 let mut hash_futures = Vec::new();
@@ -501,29 +503,19 @@ where
 
                 if hashes.len() == entries_per_tile as usize {
                     // Only store if all child tiles are full
-                    let mut all_children_full = true;
-
-                    for position in start_position..end_position {
-                        if level == 0 {
-                            // Level 0 has no children, so all are considered "full"
-                            break;
-                        }
-
+                    let all_children_full = if level == 0 {
+                        // Level 0 has no children, so all are considered "full"
+                        true
+                    } else {
+                        // For levels > 0, check if all 256 child tiles would be full
+                        // A parent tile can only be stored if all its children are full tiles
                         let child_level = level - 1;
-                        let child_subtree_size = 256u64.pow(child_level as u32);
-                        let child_total_positions = tree_size.div_ceil(child_subtree_size);
 
-                        // Check if this child tile would be full
-                        let child_tile_start = position * 256;
-                        let child_tile_end =
-                            std::cmp::min(child_tile_start + 256, child_total_positions);
-                        let child_tile_size = child_tile_end - child_tile_start;
-
-                        if child_tile_size < 256 {
-                            all_children_full = false;
-                            break;
-                        }
-                    }
+                        // Calculate if the last child tile position would be full
+                        // If the last child is full, all previous children must also be full
+                        let last_child_tile_index = (tile_index + 1) * 256 - 1;
+                        Self::is_tile_full_at_size(child_level, last_child_tile_index, tree_size)
+                    };
 
                     if all_children_full {
                         let tile = crate::types::tiles::Tile::new(hashes);
@@ -538,6 +530,9 @@ where
                 }
             }
         }
+
+        // Update the last precomputed size in the same batch
+        Self::hashed_batch_put(batch, LAST_PRECOMPUTED_SIZE_KEY, &tree_size.to_be_bytes());
 
         Ok(())
     }
