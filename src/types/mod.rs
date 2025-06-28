@@ -280,17 +280,15 @@ impl LogEntry {
 
         // Extensions
         if let Some(idx) = index {
-            // Extensions length (2 bytes) - leaf_index extension
-            // Extension type (1 byte) + length (2 bytes) + data (5 bytes) = 8 bytes total
-            data.extend_from_slice(&[0x00, 0x08]);
+            // Create extension data without outer length (matching SCT format)
+            let leaf_ext = crate::types::sct_extensions::Extension::leaf_index(idx)
+                .expect("Failed to create leaf index extension");
+            let ext_data = leaf_ext.encode();
 
-            // Extension type (1 byte) - leaf_index (0)
-            data.push(0x00);
-            // Extension data length (2 bytes) - 5 bytes for 40-bit index
-            data.extend_from_slice(&[0x00, 0x05]);
-            // LeafIndex as 40-bit big-endian integer
-            let index_bytes = idx.to_be_bytes();
-            data.extend_from_slice(&index_bytes[3..8]); // Take last 5 bytes for 40-bit value
+            // Add length prefix for MerkleTreeLeaf serialization
+            let ext_len = ext_data.len() as u16;
+            data.extend_from_slice(&ext_len.to_be_bytes());
+            data.extend_from_slice(&ext_data);
         } else {
             // Extensions length (2 bytes) - no extensions
             data.extend_from_slice(&[0x00, 0x00]);

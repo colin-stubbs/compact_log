@@ -162,9 +162,10 @@ impl SctBuilder {
 
         // Add leaf_index extension if provided
         if let Some(idx) = index {
-            sct.extensions = CtExtensions::with_leaf_index(idx).map_err(|e| {
+            let full_extensions = CtExtensions::with_leaf_index(idx).map_err(|e| {
                 CtError::Internal(format!("Failed to create leaf_index extension: {}", e))
             })?;
+            sct.extensions = full_extensions[2..].to_vec();
         }
 
         let signature_input = sct.get_signature_input(certificate, entry_type, issuer_key_hash);
@@ -523,17 +524,13 @@ mod tests {
         assert_eq!(sct.log_id, log_id);
         assert_eq!(sct.timestamp, timestamp);
 
-        // Verify extensions are present and have correct length
-        // According to spec: 2 bytes length + 1 byte type + 2 bytes data length + 5 bytes leaf index = 10 bytes total
-        assert_eq!(sct.extensions.len(), 10);
+        assert_eq!(sct.extensions.len(), 8);
 
-        // Verify extension structure
-        assert_eq!(&sct.extensions[0..2], &[0, 8]); // Total extensions length = 8
-        assert_eq!(sct.extensions[2], 0); // Extension type = leaf_index (0)
-        assert_eq!(&sct.extensions[3..5], &[0, 5]); // Extension data length = 5
+        assert_eq!(sct.extensions[0], 0); // Extension type = leaf_index (0)
+        assert_eq!(&sct.extensions[1..3], &[0, 5]); // Extension data length = 5
 
         // Verify leaf index encoding (big-endian 40-bit)
-        let encoded_index = &sct.extensions[5..10];
+        let encoded_index = &sct.extensions[3..8];
         let decoded_index = ((encoded_index[0] as u64) << 32)
             | ((encoded_index[1] as u64) << 24)
             | ((encoded_index[2] as u64) << 16)
@@ -571,7 +568,7 @@ mod tests {
             .unwrap();
 
         // Verify the max index is encoded correctly
-        let encoded_index = &sct.extensions[5..10];
+        let encoded_index = &sct.extensions[3..8];
         assert_eq!(encoded_index, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
     }
 
@@ -635,7 +632,7 @@ mod tests {
         assert!(verifying_key.verify(&signature_input, &signature).is_ok());
 
         // Verify leaf index in extensions
-        let encoded_index = &sct.extensions[5..10];
+        let encoded_index = &sct.extensions[3..8];
         let decoded_index = ((encoded_index[0] as u64) << 32)
             | ((encoded_index[1] as u64) << 24)
             | ((encoded_index[2] as u64) << 16)
