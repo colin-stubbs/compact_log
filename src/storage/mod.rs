@@ -19,6 +19,9 @@ pub enum StorageError {
 
     #[error("Invalid data format: {0}")]
     InvalidFormat(String),
+
+    #[error("Queue full - system at capacity")]
+    QueueFull,
 }
 
 impl Clone for StorageError {
@@ -28,6 +31,7 @@ impl Clone for StorageError {
                 StorageError::InvalidFormat("SlateDB error during batch processing".to_string())
             }
             StorageError::InvalidFormat(s) => StorageError::InvalidFormat(s.clone()),
+            StorageError::QueueFull => StorageError::QueueFull,
         }
     }
 }
@@ -160,10 +164,30 @@ impl CtStorage {
             completion_tx,
         };
 
-        self.batch_sender.send(batch_entry).await.map_err(|_| {
-            tracing::error!("add_entry_batched: Batch worker not running");
-            StorageError::InvalidFormat("Batch worker not running".into())
-        })?;
+        match self.batch_sender.try_send(batch_entry) {
+            Ok(_) => {
+                tracing::trace!(
+                    "add_entry_batched: Added entry to batch queue, current depth: {}/{}",
+                    self.batch_sender.capacity(),
+                    self.batch_sender.max_capacity()
+                );
+            }
+            Err(e) => match e {
+                mpsc::error::TrySendError::Full(_) => {
+                    tracing::warn!(
+                        "add_entry_batched: Batch queue is full at capacity {}",
+                        self.batch_sender.max_capacity()
+                    );
+                    return Err(StorageError::QueueFull);
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    tracing::error!("add_entry_batched: Batch worker not running");
+                    return Err(StorageError::InvalidFormat(
+                        "Batch worker not running".into(),
+                    ));
+                }
+            },
+        }
 
         tracing::trace!("add_entry_batched: Added entry to batch queue");
 

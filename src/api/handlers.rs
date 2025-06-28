@@ -187,7 +187,15 @@ pub async fn add_chain(
                 .expect("Failed to create SCT")
         })
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
+        .map_err(|e| match e {
+            crate::storage::StorageError::QueueFull => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "Service temporarily unavailable - system at capacity".to_string(),
+                }),
+            ),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())),
+        })?;
 
     crate::metrics::CERTIFICATE_SUBMISSIONS_TOTAL
         .with_label_values(&["x509", "success"])
@@ -380,7 +388,15 @@ pub async fn add_pre_chain(
                 .expect("Failed to create SCT")
         })
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?;
+        .map_err(|e| match e {
+            crate::storage::StorageError::QueueFull => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "Service temporarily unavailable - system at capacity".to_string(),
+                }),
+            ),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())),
+        })?;
 
     let response = AddChainResponse {
         sct_version: sct.version as u8,
