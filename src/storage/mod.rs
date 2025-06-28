@@ -112,20 +112,6 @@ impl BatchConfig {
 }
 
 impl CtStorage {
-    /// Hash a key using SHA-256 to distribute keys evenly across keyspace
-    fn hash_key(key: &[u8]) -> Vec<u8> {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(key);
-        hasher.finalize().to_vec()
-    }
-
-    /// Wrapper for db.get that hashes the key first
-    async fn hashed_get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        let hashed_key = Self::hash_key(key);
-        Ok(self.db.get(&hashed_key).await?)
-    }
-
     pub async fn new(
         db: RateLimitedDb,
         config: BatchConfig,
@@ -662,7 +648,7 @@ impl CtStorage {
     }
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        self.hashed_get(key).await
+        Ok(self.db.get(key).await?)
     }
 
     /// Find index by hash

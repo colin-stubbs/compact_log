@@ -89,41 +89,15 @@ where
     H: Digest,
     T: HashableLeaf + serde::Serialize + serde::de::DeserializeOwned,
 {
-    /// Hash a key using SHA-256 to distribute keys evenly across keyspace
-    fn hash_key(key: &[u8]) -> Vec<u8> {
-        use sha2::{Digest as Sha256Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(key);
-        hasher.finalize().to_vec()
-    }
-
-    /// Wrapper for db.get that hashes the key first
-    async fn hashed_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, SlateDbTreeError> {
-        let hashed_key = Self::hash_key(key);
-        Ok(self.db.get(&hashed_key).await?.map(|bytes| bytes.to_vec()))
-    }
-
-    /// Wrapper for db.put that hashes the key first
-    async fn hashed_put(&self, key: &[u8], value: &[u8]) -> Result<(), SlateDbTreeError> {
-        let hashed_key = Self::hash_key(key);
-        Ok(self.db.put(&hashed_key, value).await?)
-    }
-
-    /// Wrapper for batch.put that hashes the key first
-    fn hashed_batch_put(batch: &mut WriteBatch, key: &[u8], value: &[u8]) {
-        let hashed_key = Self::hash_key(key);
-        batch.put(hashed_key, value);
-    }
-
     /// Check if multiple keys exist in the database
     pub async fn check_keys_exist(&self, keys: &[Vec<u8>]) -> Result<Vec<bool>, SlateDbTreeError> {
         let futures: Vec<_> = keys
             .iter()
             .map(|key| async move {
-                match self.hashed_get(key).await {
+                match self.db.get(key).await {
                     Ok(Some(_)) => Ok(true),
                     Ok(None) => Ok(false),
-                    Err(e) => Err(e),
+                    Err(e) => Err(SlateDbTreeError::DbError(e)),
                 }
             })
             .collect();
@@ -150,8 +124,7 @@ where
         if existing_leaves.is_none() {
             tree.set_num_leaves(0).await?;
             // Also initialize committed size to 0
-            tree.hashed_put(COMMITTED_SIZE_KEY, &0u64.to_be_bytes())
-                .await?;
+            tree.db.put(COMMITTED_SIZE_KEY, &0u64.to_be_bytes()).await?;
         }
 
         Ok(tree)
@@ -181,7 +154,7 @@ where
     }
 
     async fn get_num_leaves(&self) -> Result<Option<u64>, SlateDbTreeError> {
-        match self.hashed_get(META_KEY).await? {
+        match self.db.get(META_KEY).await? {
             Some(bytes) => {
                 let bytes_ref: &[u8] = bytes.as_ref();
                 let bytes_array: [u8; 8] = bytes_ref
@@ -195,7 +168,10 @@ where
     }
 
     async fn set_num_leaves(&self, num_leaves: u64) -> Result<(), SlateDbTreeError> {
-        self.hashed_put(META_KEY, &num_leaves.to_be_bytes()).await
+        self.db
+            .put(META_KEY, &num_leaves.to_be_bytes())
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn len(&self) -> Result<u64, SlateDbTreeError> {
@@ -204,7 +180,7 @@ where
 
     /// Get the last committed tree size (for STH generation)
     pub async fn get_committed_size(&self) -> Result<u64, SlateDbTreeError> {
-        match self.hashed_get(COMMITTED_SIZE_KEY).await? {
+        match self.db.get(COMMITTED_SIZE_KEY).await? {
             Some(bytes) => {
                 let bytes_ref: &[u8] = bytes.as_ref();
                 let bytes_array: [u8; 8] = bytes_ref.try_into().map_err(|_| {
@@ -221,7 +197,7 @@ where
 
     /// Get the last tree size at which tiles were precomputed
     async fn get_last_precomputed_size(&self) -> Result<u64, SlateDbTreeError> {
-        match self.hashed_get(LAST_PRECOMPUTED_SIZE_KEY).await? {
+        match self.db.get(LAST_PRECOMPUTED_SIZE_KEY).await? {
             Some(bytes) => {
                 let bytes_ref: &[u8] = bytes.as_ref();
                 let bytes_array: [u8; 8] = bytes_ref.try_into().map_err(|_| {
@@ -266,7 +242,7 @@ where
         index: u64,
     ) -> Result<Option<Vec<u8>>, SlateDbTreeError> {
         let key = Self::tile_key(level, index);
-        match self.hashed_get(&key).await? {
+        match self.db.get(&key).await? {
             Some(bytes) => Ok(Some(bytes.to_vec())),
             None => Ok(None),
         }
@@ -334,7 +310,7 @@ where
         for item in items.iter() {
             let leaf_bytes = postcard::to_stdvec(item)
                 .map_err(|e| SlateDbTreeError::EncodingError(e.to_string()))?;
-            Self::hashed_batch_put(&mut batch, &Self::leaf_key(current_num_leaves), &leaf_bytes);
+            batch.put(Self::leaf_key(current_num_leaves), &leaf_bytes);
 
             let new_leaf_idx = LeafIdx::new(current_num_leaves);
             let new_num_leaves = current_num_leaves + 1;
@@ -380,28 +356,22 @@ where
         // After processing all entries, store versioned nodes for the final tree state
         let final_tree_size = current_num_leaves;
         for (node_idx, node_hash) in computed_hashes.iter() {
-            Self::hashed_batch_put(
-                &mut batch,
-                &Self::versioned_node_key(*node_idx, final_tree_size),
+            batch.put(
+                Self::versioned_node_key(*node_idx, final_tree_size),
                 node_hash.as_ref(),
             );
-            Self::hashed_batch_put(
-                &mut batch,
-                &Self::node_latest_version_key(*node_idx),
-                &final_tree_size.to_be_bytes(),
+            batch.put(
+                Self::node_latest_version_key(*node_idx),
+                final_tree_size.to_be_bytes(),
             );
         }
 
-        Self::hashed_batch_put(&mut batch, META_KEY, &current_num_leaves.to_be_bytes());
-        Self::hashed_batch_put(
-            &mut batch,
-            COMMITTED_SIZE_KEY,
-            &current_num_leaves.to_be_bytes(),
-        );
+        batch.put(META_KEY, current_num_leaves.to_be_bytes());
+        batch.put(COMMITTED_SIZE_KEY, current_num_leaves.to_be_bytes());
 
         // Add additional key-value pairs to the same batch
         for (key, value) in additional_data {
-            Self::hashed_batch_put(&mut batch, &key, &value);
+            batch.put(&key, &value);
         }
 
         // Precompute tiles in the same batch for atomicity
@@ -521,7 +491,7 @@ where
                         let tile = crate::types::tiles::Tile::new(hashes);
                         let tile_bytes = tile.to_bytes();
                         let key = Self::tile_key(level, tile_index);
-                        Self::hashed_batch_put(batch, &key, &tile_bytes);
+                        batch.put(key, &tile_bytes);
 
                         if let Some(ref cache) = self.tile_cache {
                             cache.insert((level, tile_index), true).await;
@@ -532,7 +502,7 @@ where
         }
 
         // Update the last precomputed size in the same batch
-        Self::hashed_batch_put(batch, LAST_PRECOMPUTED_SIZE_KEY, &tree_size.to_be_bytes());
+        batch.put(LAST_PRECOMPUTED_SIZE_KEY, tree_size.to_be_bytes());
 
         Ok(())
     }
@@ -574,8 +544,8 @@ where
         let new_version_check = Self::versioned_node_key(new_root_idx.as_u64(), new_size);
 
         let (old_exists, new_exists) = tokio::join!(
-            self.hashed_get(&old_version_check),
-            self.hashed_get(&new_version_check)
+            self.db.get(&old_version_check),
+            self.db.get(&new_version_check)
         );
 
         match (old_exists?, new_exists?) {
@@ -606,7 +576,7 @@ where
 
     pub async fn get_node_hash(&self, idx: u64) -> Result<digest::Output<H>, SlateDbTreeError> {
         // Get the latest version for this node
-        match self.hashed_get(&Self::node_latest_version_key(idx)).await? {
+        match self.db.get(&Self::node_latest_version_key(idx)).await? {
             Some(version_bytes) => {
                 let version_ref: &[u8] = version_bytes.as_ref();
                 let version_array: [u8; 8] = version_ref.try_into().map_err(|_| {
@@ -640,7 +610,7 @@ where
         }
 
         let exact_key = Self::versioned_node_key(idx, version);
-        if let Some(bytes) = self.hashed_get(&exact_key).await? {
+        if let Some(bytes) = self.db.get(&exact_key).await? {
             let mut hash = digest::Output::<H>::default();
             if bytes.len() == hash.len() {
                 hash.copy_from_slice(&bytes);
@@ -655,7 +625,7 @@ where
             }
         }
 
-        match self.hashed_get(&Self::node_latest_version_key(idx)).await? {
+        match self.db.get(&Self::node_latest_version_key(idx)).await? {
             Some(latest_version_bytes) => {
                 let latest_version_ref: &[u8] = latest_version_bytes.as_ref();
                 let latest_version_array: [u8; 8] =
@@ -676,7 +646,7 @@ where
                 } else {
                     // Node exists at this version, read from its latest version
                     let versioned_key = Self::versioned_node_key(idx, latest_version);
-                    match self.hashed_get(&versioned_key).await? {
+                    match self.db.get(&versioned_key).await? {
                         Some(bytes) => {
                             let mut hash = digest::Output::<H>::default();
                             if bytes.len() == hash.len() {
@@ -734,7 +704,7 @@ where
 
         // Check if this is a published STH boundary
         let version_check_key = Self::versioned_node_key(root_idx.as_u64(), tree_size);
-        if self.hashed_get(&version_check_key).await?.is_none() {
+        if self.db.get(&version_check_key).await?.is_none() {
             return Err(SlateDbTreeError::InconsistentState(format!(
                 "Tree size {} is not a published STH boundary",
                 tree_size
@@ -779,7 +749,7 @@ where
         let root_idx = root_idx(tree_size);
         let version_check_key = Self::versioned_node_key(root_idx.as_u64(), tree_size);
 
-        match self.hashed_get(&version_check_key).await? {
+        match self.db.get(&version_check_key).await? {
             Some(_) => {
                 // We have versioned nodes for this tree size (published STH)
                 let idxs = indices_for_inclusion_proof(tree_size, idx);
@@ -830,19 +800,15 @@ where
 
         let leaf_bytes = postcard::to_stdvec(&new_val)
             .map_err(|e| SlateDbTreeError::EncodingError(e.to_string()))?;
-        Self::hashed_batch_put(&mut batch, &Self::leaf_key(num_leaves), &leaf_bytes);
+        batch.put(Self::leaf_key(num_leaves), &leaf_bytes);
 
         let new_leaf_idx = LeafIdx::new(num_leaves);
         let computed_hashes = self
             .recalculate_path_batch(&mut batch, new_leaf_idx, &new_val, num_leaves + 1)
             .await?;
 
-        Self::hashed_batch_put(&mut batch, META_KEY, &(num_leaves + 1).to_be_bytes());
-        Self::hashed_batch_put(
-            &mut batch,
-            COMMITTED_SIZE_KEY,
-            &(num_leaves + 1).to_be_bytes(),
-        );
+        batch.put(META_KEY, (num_leaves + 1).to_be_bytes());
+        batch.put(COMMITTED_SIZE_KEY, (num_leaves + 1).to_be_bytes());
 
         // Precompute tiles in the same batch for atomicity
         self.precompute_tiles_batch(&mut batch, num_leaves + 1, &computed_hashes)
@@ -904,15 +870,13 @@ where
 
         // Store versioned nodes for the final tree state (single-entry batch)
         for (node_idx, node_hash) in computed_hashes.iter() {
-            Self::hashed_batch_put(
-                batch,
-                &Self::versioned_node_key(*node_idx, num_leaves),
+            batch.put(
+                Self::versioned_node_key(*node_idx, num_leaves),
                 node_hash.as_ref(),
             );
-            Self::hashed_batch_put(
-                batch,
-                &Self::node_latest_version_key(*node_idx),
-                &num_leaves.to_be_bytes(),
+            batch.put(
+                Self::node_latest_version_key(*node_idx),
+                num_leaves.to_be_bytes(),
             );
         }
 
@@ -934,7 +898,7 @@ where
     }
 
     pub async fn get(&self, idx: u64) -> Result<Option<T>, SlateDbTreeError> {
-        match self.hashed_get(&Self::leaf_key(idx)).await? {
+        match self.db.get(&Self::leaf_key(idx)).await? {
             Some(bytes) => {
                 let leaf = postcard::from_bytes(&bytes)
                     .map_err(|e| SlateDbTreeError::EncodingError(e.to_string()))?;
@@ -1083,15 +1047,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Verify the additional data was written (using hashed keys)
-        use sha2::{Digest as TestDigest, Sha256 as TestSha256};
-        let hash_test_key = |key: &[u8]| {
-            let mut hasher = TestSha256::new();
-            hasher.update(key);
-            hasher.finalize().to_vec()
-        };
-        assert!(db.get(&hash_test_key(b"key1")).await.unwrap().is_some());
-        assert!(db.get(&hash_test_key(b"key2")).await.unwrap().is_some());
+        // Verify the additional data was written
+        assert!(db.get(b"key1").await.unwrap().is_some());
+        assert!(db.get(b"key2").await.unwrap().is_some());
     }
 
     #[tokio::test]
