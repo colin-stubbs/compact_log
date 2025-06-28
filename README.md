@@ -21,6 +21,33 @@ View real-time performance metrics and system health:
 
 **[Live Monitoring Dashboard](https://dashboards.merklemap.com/public-dashboards/0ba4b40dda0449d7ab29ac8d6be90dd9?from=now-1h&to=now&timezone=browser)**
 
+## Performance Benchmarks
+
+CompactLog delivers exceptional performance compared to newer Static CT API-only implementations, while uniquely providing both RFC 6962 and Static CT APIs from the same server. Recent benchmarks demonstrate significant advantages over dedicated static-only CT servers:
+
+<p align="center">
+  <img src="assets/latency_percentiles_1000.png" alt="Latency Percentiles at 1000 Connections" width="48%" />
+  <img src="assets/average_latency.png" alt="Average Latency Scaling" width="48%" />
+</p>
+
+**Key Performance Highlights:**
+- **2.5-4x lower latency** compared to Sunlight (static-only)
+- **4-5x lower latency** compared to Cloudflare's Azul (static-only)
+- **Linear scalability** with connection count, maintaining consistent performance under load
+- All while serving both RFC 6962 and Static CT APIs simultaneously
+
+<p align="center">
+  <img src="assets/throughput_comparison.png" alt="Throughput Comparison" width="48%" />
+  <img src="assets/error_rates.png" alt="Error Rates" width="48%" />
+</p>
+
+**Reliability & Throughput:**
+- **Zero errors** across all connection levels (50, 1000, 3000 concurrent connections)
+- **17x higher throughput** than Cloudflare Azul at 1000 connections
+- **1.5x higher throughput** than Sunlight at 3000 connections
+
+These benchmarks demonstrate that CompactLog's dual-API architecture doesn't compromise performance. By leveraging efficient batching and LSM-tree storage, it delivers better performance than specialized static-only implementations while providing the flexibility of both APIs.
+
 ## Overview
 
 This implementation provides a complete Certificate Transparency log that:
