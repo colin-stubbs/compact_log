@@ -451,6 +451,7 @@ async fn initialize_storage(
             }
             None => ObjectStoreCacheOptions::default(),
         },
+        max_unflushed_bytes: 128 * 1024 * 1024,
         ..Default::default()
     };
 
