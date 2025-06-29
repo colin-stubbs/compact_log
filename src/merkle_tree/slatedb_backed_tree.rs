@@ -375,8 +375,13 @@ where
         }
 
         // Precompute tiles in the same batch for atomicity
-        self.precompute_tiles_batch(&mut batch, final_tree_size, &computed_hashes)
-            .await?;
+        self.precompute_tiles_batch(
+            &mut batch,
+            starting_index,
+            final_tree_size,
+            &computed_hashes,
+        )
+        .await?;
 
         // Single atomic write for both tree updates and tiles
         self.db.write_batch(batch).await?;
@@ -387,6 +392,7 @@ where
     async fn precompute_tiles_batch(
         &self,
         batch: &mut WriteBatch,
+        starting_index: u64,
         tree_size: u64,
         computed_hashes: &std::collections::BTreeMap<u64, digest::Output<H>>,
     ) -> Result<(), SlateDbTreeError> {
@@ -400,17 +406,24 @@ where
             let has_partial = (tree_size % subtree_size) > 0;
             let total_positions = full_subtrees + if has_partial { 1 } else { 0 };
 
-            let num_tiles = total_positions.div_ceil(entries_per_tile);
+            // Calculate the range of tiles affected by this batch
+            // A tile is affected if any of the new entries fall within its range
+            let first_new_position = starting_index / subtree_size;
+            let last_new_position = (tree_size - 1) / subtree_size;
+
+            let first_affected_tile = first_new_position / entries_per_tile;
+            let last_affected_tile = last_new_position / entries_per_tile;
 
             let mut tiles_to_process = Vec::new();
 
-            for tile_index in 0..num_tiles {
+            // Only iterate through potentially affected tiles
+            for tile_index in first_affected_tile..=last_affected_tile {
                 let start_position = tile_index * entries_per_tile;
                 let end_position =
                     std::cmp::min(start_position + entries_per_tile, total_positions);
 
                 if start_position >= total_positions {
-                    continue;
+                    break;
                 }
 
                 let tile_size = end_position - start_position;
@@ -811,7 +824,7 @@ where
         batch.put(COMMITTED_SIZE_KEY, (num_leaves + 1).to_be_bytes());
 
         // Precompute tiles in the same batch for atomicity
-        self.precompute_tiles_batch(&mut batch, num_leaves + 1, &computed_hashes)
+        self.precompute_tiles_batch(&mut batch, num_leaves, num_leaves + 1, &computed_hashes)
             .await?;
 
         // Single atomic write for both tree updates and tiles
