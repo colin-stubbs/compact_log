@@ -310,25 +310,6 @@ impl CtStorage {
 
         tracing::trace!("flush_batch: Flushing {} entries", batch_size);
 
-        let mut leaf_data_vec = Vec::new();
-
-        #[allow(clippy::type_complexity)]
-        let mut entry_metadata: Vec<(
-            usize,
-            Vec<u8>,
-            [u8; 32],
-            SignedCertificateTimestamp,
-            LogEntry,
-        )> = Vec::new();
-
-        // Store completion info separately
-        #[allow(clippy::type_complexity)]
-        let mut completion_info: Vec<(
-            oneshot::Sender<Result<(u64, SignedCertificateTimestamp)>>,
-            Option<SignedCertificateTimestamp>,
-        )> = Vec::new();
-        let mut failed_entries = Vec::new();
-
         // Deduplication tracking variables
         let mut cert_hashes_to_check = std::collections::HashSet::new();
         let mut bytes_saved = 0u64;
@@ -358,56 +339,72 @@ impl CtStorage {
             start_time.elapsed()
         );
 
-        // Process entries and generate SCTs with assigned indices
-        for (i, mut entry) in entries.drain(..).enumerate() {
-            let assigned_index = starting_index + i as u64;
+        let entries_vec: Vec<BatchEntry> = entries.drain(..).collect();
+        let entries_count = entries_vec.len();
 
-            // Update the log entry with the assigned index
-            entry.log_entry.index = assigned_index;
+        let (processed_data, completion_info) = tokio::task::spawn_blocking(move || {
+            let mut leaf_data_vec = Vec::with_capacity(entries_count);
+            let mut entry_metadata = Vec::with_capacity(entries_count);
+            let mut completion_info = Vec::with_capacity(entries_count);
+            let mut failed_entries = Vec::new();
 
-            // Generate SCT with the assigned index
-            let sct = (entry.sct_callback)(assigned_index);
+            for (i, mut entry) in entries_vec.into_iter().enumerate() {
+                let assigned_index = starting_index + i as u64;
+                entry.log_entry.index = assigned_index;
 
-            // Regenerate leaf_data with the assigned index
-            let leaf_data_with_index = LogEntry::compute_leaf_data_with_index(
-                &entry.log_entry.certificate,
-                entry.log_entry.entry_type,
-                entry.log_entry.issuer_key_hash.as_deref(),
-                entry.log_entry.timestamp,
-                assigned_index,
-            );
+                // CPU-intensive ECDSA signing
+                let sct = (entry.sct_callback)(assigned_index);
 
-            // Update the leaf_data in the entry to match what we're storing in the merkle tree
-            entry.log_entry.leaf_data = leaf_data_with_index.clone();
+                let leaf_data_with_index = LogEntry::compute_leaf_data_with_index(
+                    &entry.log_entry.certificate,
+                    entry.log_entry.entry_type,
+                    entry.log_entry.issuer_key_hash.as_deref(),
+                    entry.log_entry.timestamp,
+                    assigned_index,
+                );
 
-            // Debug: print the hash for the first entry
-            if assigned_index == 0 {
-                use sha2::Digest;
-                let mut hasher = sha2::Sha256::new();
-                hasher.update([0x00]);
-                hasher.update(&leaf_data_with_index);
+                entry.log_entry.leaf_data = leaf_data_with_index.clone();
+
+                if assigned_index == 0 {
+                    use sha2::Digest;
+                    let mut hasher = sha2::Sha256::new();
+                    hasher.update([0x00]);
+                    hasher.update(&leaf_data_with_index);
+                }
+
+                let dedup_entry = DeduplicatedLogEntry::from_log_entry(&entry.log_entry);
+
+                match postcard::to_stdvec(&dedup_entry) {
+                    Ok(entry_data) => {
+                        entry_metadata.push((
+                            i,
+                            entry_data,
+                            entry.cert_hash,
+                            sct.clone(),
+                            entry.log_entry.clone(),
+                        ));
+                        leaf_data_vec.push(leaf_data_with_index);
+                        completion_info.push((entry.completion_tx, Some(sct)));
+                    }
+                    Err(e) => {
+                        failed_entries.push((i, StorageError::InvalidFormat(e.to_string())));
+                        completion_info.push((entry.completion_tx, None));
+                    }
+                }
             }
 
-            let dedup_entry = DeduplicatedLogEntry::from_log_entry(&entry.log_entry);
+            (
+                (leaf_data_vec, entry_metadata, failed_entries),
+                completion_info,
+            )
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to process entries in blocking task: {:?}", e);
+        })
+        .unwrap_or_else(|_| ((Vec::new(), Vec::new(), Vec::new()), Vec::new()));
 
-            match postcard::to_stdvec(&dedup_entry) {
-                Ok(entry_data) => {
-                    entry_metadata.push((
-                        i,
-                        entry_data,
-                        entry.cert_hash,
-                        sct.clone(),
-                        entry.log_entry.clone(), // Keep original for certificate storage
-                    ));
-                    leaf_data_vec.push(leaf_data_with_index);
-                    completion_info.push((entry.completion_tx, Some(sct)));
-                }
-                Err(e) => {
-                    failed_entries.push((i, StorageError::InvalidFormat(e.to_string())));
-                    completion_info.push((entry.completion_tx, None));
-                }
-            }
-        }
+        let (leaf_data_vec, entry_metadata, failed_entries) = processed_data;
 
         tracing::trace!(
             "Elapsed time after processing entries: {:?}",
