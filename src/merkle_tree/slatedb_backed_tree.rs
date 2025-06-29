@@ -10,7 +10,7 @@ use crate::storage::RateLimitedDb;
 use digest::Digest;
 use moka::future::Cache;
 use slatedb::WriteBatch;
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
 #[derive(Debug)]
@@ -106,9 +106,15 @@ where
     }
 
     pub async fn new(db: RateLimitedDb) -> Result<Self, SlateDbTreeError> {
-        let node_cache = Cache::builder().max_capacity(10_000_000).build();
+        let node_cache = Cache::builder()
+            .max_capacity(100_000)
+            .time_to_live(Duration::from_secs(300))
+            .build();
 
-        let tile_cache = Cache::builder().max_capacity(100_000).build();
+        let tile_cache = Cache::builder()
+            .max_capacity(100_000)
+            .time_to_live(Duration::from_secs(300))
+            .build();
 
         let tree = Self {
             db,

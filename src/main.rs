@@ -411,6 +411,7 @@ async fn initialize_storage(
         .unwrap_or(DEFAULT_MEMORY_BLOCK_CACHE_CAPACITY_MB);
 
     let cache_options = MokaCacheOptions {
+        time_to_live: Some(Duration::from_secs(60 * 60 * 5)),
         max_capacity: memory_block_cache_mb * 1024 * 1024, // Convert MB to bytes
         ..default::Default::default()
     };
