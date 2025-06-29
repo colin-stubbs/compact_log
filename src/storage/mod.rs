@@ -208,53 +208,85 @@ impl CtStorage {
         tracing::trace!("batch_worker: Starting background worker");
         let mut pending_entries = Vec::with_capacity(config.max_batch_size);
         let timeout_duration = std::time::Duration::from_millis(config.max_batch_timeout_ms);
-
-        let mut interval = tokio::time::interval(timeout_duration);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut oldest_entry_time: Option<Instant> = None;
 
         loop {
-            tokio::select! {
-                entry = batch_receiver.recv() => {
-                    match entry {
-                        Some(entry) => {
-                            tracing::debug!("batch_worker: Received entry");
-                            pending_entries.push(entry);
+            let deadline = oldest_entry_time.map(|t| t + timeout_duration);
 
-                            // After receiving one entry, try to drain more without blocking
-                            while pending_entries.len() < config.max_batch_size {
-                                match batch_receiver.try_recv() {
-                                    Ok(entry) => {
-                                        pending_entries.push(entry);
-                                    }
-                                    Err(_) => break, // Channel empty or closed
-                                }
-                            }
-
-                            if pending_entries.len() >= config.max_batch_size {
-                                tracing::trace!("batch_worker: Batch full ({}), flushing {} entries", config.max_batch_size, pending_entries.len());
-                                Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
-                            }
-                        }
-                        None => {
-                            if !pending_entries.is_empty() {
-                                tracing::trace!("batch_worker: Channel closed, flushing {} remaining entries", pending_entries.len());
-                                Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
-                            }
-                            tracing::info!("batch_worker: Exiting");
-                            break;
-                        }
+            let recv_result = if let Some(deadline) = deadline {
+                match tokio::time::timeout_at(deadline.into(), batch_receiver.recv()).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::trace!(
+                            "batch_worker: Timeout after {}ms, flushing {} entries",
+                            timeout_duration.as_millis(),
+                            pending_entries.len()
+                        );
+                        Self::flush_batch(
+                            &mut pending_entries,
+                            batch_mutex.clone(),
+                            merkle_tree.clone(),
+                            batch_stats.clone(),
+                        )
+                        .await;
+                        oldest_entry_time = None;
+                        continue;
                     }
                 }
+            } else {
+                batch_receiver.recv().await
+            };
 
-                _ = interval.tick() => {
-                    // Time-based flush
-                    if !pending_entries.is_empty() {
-                        let time = Instant::now();
-                        tracing::trace!("batch_worker: Time flush after {}ms, flushing {} entries",
-                            timeout_duration.as_millis(), pending_entries.len());
-                        Self::flush_batch(&mut pending_entries, batch_mutex.clone(), merkle_tree.clone(), batch_stats.clone()).await;
-                        tracing::trace!("batch_worker: Flushed in {}ms", time.elapsed().as_millis());
+            match recv_result {
+                Some(entry) => {
+                    if pending_entries.is_empty() {
+                        oldest_entry_time = Some(Instant::now());
+                        tracing::trace!("batch_worker: Starting new batch");
                     }
+
+                    pending_entries.push(entry);
+
+                    while pending_entries.len() < config.max_batch_size {
+                        match batch_receiver.try_recv() {
+                            Ok(entry) => {
+                                pending_entries.push(entry);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+
+                    if pending_entries.len() >= config.max_batch_size {
+                        tracing::trace!(
+                            "batch_worker: Batch full ({}), flushing {} entries",
+                            config.max_batch_size,
+                            pending_entries.len()
+                        );
+                        Self::flush_batch(
+                            &mut pending_entries,
+                            batch_mutex.clone(),
+                            merkle_tree.clone(),
+                            batch_stats.clone(),
+                        )
+                        .await;
+                        oldest_entry_time = None;
+                    }
+                }
+                None => {
+                    if !pending_entries.is_empty() {
+                        tracing::trace!(
+                            "batch_worker: Channel closed, flushing {} remaining entries",
+                            pending_entries.len()
+                        );
+                        Self::flush_batch(
+                            &mut pending_entries,
+                            batch_mutex.clone(),
+                            merkle_tree.clone(),
+                            batch_stats.clone(),
+                        )
+                        .await;
+                    }
+                    tracing::info!("batch_worker: Channel closed, exiting");
+                    break;
                 }
             }
         }
