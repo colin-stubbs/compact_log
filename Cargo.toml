@@ -51,6 +51,7 @@ prometheus = { version = "0.14", features = ["process"] }
 lazy_static = "1.4"
 flate2 = "1.1"
 num_cpus = "1.16"
+rayon = "1.10"
 
 [dev-dependencies]
 subtle = "2.5"

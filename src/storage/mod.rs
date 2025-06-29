@@ -3,6 +3,7 @@ use crate::types::{sct::SignedCertificateTimestamp, DeduplicatedLogEntry, LogEnt
 use crate::validation::tbs_extractor::TbsExtractor;
 use bytes::Bytes;
 use futures::future::join_all;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -343,52 +344,80 @@ impl CtStorage {
         let entries_count = entries_vec.len();
 
         let (processed_data, completion_info) = tokio::task::spawn_blocking(move || {
+            let results: Vec<_> = entries_vec
+                .into_par_iter()
+                .enumerate()
+                .map(|(i, mut entry)| {
+                    let assigned_index = starting_index + i as u64;
+                    entry.log_entry.index = assigned_index;
+
+                    // CPU-intensive ECDSA signing
+                    let sct = (entry.sct_callback)(assigned_index);
+
+                    let leaf_data_with_index = LogEntry::compute_leaf_data_with_index(
+                        &entry.log_entry.certificate,
+                        entry.log_entry.entry_type,
+                        entry.log_entry.issuer_key_hash.as_deref(),
+                        entry.log_entry.timestamp,
+                        assigned_index,
+                    );
+
+                    entry.log_entry.leaf_data = leaf_data_with_index.clone();
+
+                    if assigned_index == 0 {
+                        use sha2::Digest;
+                        let mut hasher = sha2::Sha256::new();
+                        hasher.update([0x00]);
+                        hasher.update(&leaf_data_with_index);
+                    }
+
+                    let dedup_entry = DeduplicatedLogEntry::from_log_entry(&entry.log_entry);
+
+                    match postcard::to_stdvec(&dedup_entry) {
+                        Ok(entry_data) => Ok((
+                            i,
+                            leaf_data_with_index,
+                            entry_data,
+                            entry.cert_hash,
+                            sct.clone(),
+                            entry.log_entry,
+                            entry.completion_tx,
+                            Some(sct),
+                        )),
+                        Err(e) => Err((
+                            i,
+                            StorageError::InvalidFormat(e.to_string()),
+                            entry.completion_tx,
+                        )),
+                    }
+                })
+                .collect();
+
+            // Separate successful and failed entries
             let mut leaf_data_vec = Vec::with_capacity(entries_count);
             let mut entry_metadata = Vec::with_capacity(entries_count);
             let mut completion_info = Vec::with_capacity(entries_count);
             let mut failed_entries = Vec::new();
 
-            for (i, mut entry) in entries_vec.into_iter().enumerate() {
-                let assigned_index = starting_index + i as u64;
-                entry.log_entry.index = assigned_index;
-
-                // CPU-intensive ECDSA signing
-                let sct = (entry.sct_callback)(assigned_index);
-
-                let leaf_data_with_index = LogEntry::compute_leaf_data_with_index(
-                    &entry.log_entry.certificate,
-                    entry.log_entry.entry_type,
-                    entry.log_entry.issuer_key_hash.as_deref(),
-                    entry.log_entry.timestamp,
-                    assigned_index,
-                );
-
-                entry.log_entry.leaf_data = leaf_data_with_index.clone();
-
-                if assigned_index == 0 {
-                    use sha2::Digest;
-                    let mut hasher = sha2::Sha256::new();
-                    hasher.update([0x00]);
-                    hasher.update(&leaf_data_with_index);
-                }
-
-                let dedup_entry = DeduplicatedLogEntry::from_log_entry(&entry.log_entry);
-
-                match postcard::to_stdvec(&dedup_entry) {
-                    Ok(entry_data) => {
-                        entry_metadata.push((
-                            i,
-                            entry_data,
-                            entry.cert_hash,
-                            sct.clone(),
-                            entry.log_entry.clone(),
-                        ));
-                        leaf_data_vec.push(leaf_data_with_index);
-                        completion_info.push((entry.completion_tx, Some(sct)));
+            for result in results {
+                match result {
+                    Ok((
+                        i,
+                        leaf_data,
+                        entry_data,
+                        cert_hash,
+                        sct,
+                        log_entry,
+                        completion_tx,
+                        sct_opt,
+                    )) => {
+                        leaf_data_vec.push(leaf_data);
+                        entry_metadata.push((i, entry_data, cert_hash, sct, log_entry));
+                        completion_info.push((completion_tx, sct_opt));
                     }
-                    Err(e) => {
-                        failed_entries.push((i, StorageError::InvalidFormat(e.to_string())));
-                        completion_info.push((entry.completion_tx, None));
+                    Err((i, error, completion_tx)) => {
+                        failed_entries.push((i, error.clone()));
+                        completion_info.push((completion_tx, None));
                     }
                 }
             }
