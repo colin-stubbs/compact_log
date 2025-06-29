@@ -2,6 +2,7 @@ use crate::merkle_storage::StorageBackedMerkleTree;
 use crate::types::{sct::SignedCertificateTimestamp, DeduplicatedLogEntry, LogEntry};
 use crate::validation::tbs_extractor::TbsExtractor;
 use bytes::Bytes;
+use foyer::{Cache, CacheBuilder};
 use futures::future::join_all;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -105,6 +106,10 @@ impl KeyPrefix {
 pub struct CtStorage {
     pub(crate) db: RateLimitedDb,
     batch_sender: mpsc::Sender<BatchEntry>,
+    /// Cache for chain certificates (not leaf certificates)
+    chain_cache: Cache<Vec<u8>, Arc<Vec<u8>>>,
+    /// Cache for fully reconstructed log entries
+    entry_cache: Cache<u64, Arc<LogEntry>>,
 }
 
 impl BatchConfig {
@@ -143,7 +148,18 @@ impl CtStorage {
             Self::metrics_worker(metrics_sender, metrics_stats).await;
         });
 
-        Ok(Self { db, batch_sender })
+        let chain_cache = CacheBuilder::new(10_000).build();
+
+        let entry_cache = CacheBuilder::new(50_000)
+            .with_name("ct_storage_entry")
+            .build();
+
+        Ok(Self {
+            db,
+            batch_sender,
+            chain_cache,
+            entry_cache,
+        })
     }
 
     /// Add entry to batch queue and return assigned index and SCT
@@ -780,6 +796,30 @@ impl CtStorage {
         }
     }
 
+    /// Get a chain certificate by its hash
+    async fn get_chain_certificate(&self, cert_hash: &[u8]) -> Result<Option<Vec<u8>>> {
+        let cache_key = cert_hash.to_vec();
+        if let Some(entry) = self.chain_cache.get(&cache_key) {
+            crate::metrics::CACHE_HITS
+                .with_label_values(&["cert"])
+                .inc();
+            return Ok(Some(entry.value().as_ref().clone()));
+        }
+
+        crate::metrics::CACHE_MISSES
+            .with_label_values(&["cert"])
+            .inc();
+
+        match self.get_certificate(cert_hash).await? {
+            Some(cert) => {
+                let cert_arc = Arc::new(cert.clone());
+                self.chain_cache.insert(cache_key, cert_arc);
+                Ok(Some(cert))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Get a deduplicated log entry by index
     pub async fn get_deduplicated_entry(&self, index: u64) -> Result<Option<DeduplicatedLogEntry>> {
         let mut key = Vec::with_capacity(KeyPrefix::ENTRY.len() + 8);
@@ -815,7 +855,7 @@ impl CtStorage {
             let chain_futures = dedup_entry.chain_hashes.as_ref().map(|hashes| {
                 hashes
                     .iter()
-                    .map(|hash| self.get_certificate(hash))
+                    .map(|hash| self.get_chain_certificate(hash))
                     .collect::<Vec<_>>()
             });
 
@@ -853,7 +893,7 @@ impl CtStorage {
         let chain_futures = dedup_entry.chain_hashes.as_ref().map(|hashes| {
             hashes
                 .iter()
-                .map(|hash| self.get_certificate(hash))
+                .map(|hash| self.get_chain_certificate(hash))
                 .collect::<Vec<_>>()
         });
 
@@ -886,8 +926,26 @@ impl CtStorage {
 
     /// Get a full log entry by index (with reconstruction)
     pub async fn get_entry(&self, index: u64) -> Result<Option<LogEntry>> {
+        if let Some(entry) = self.entry_cache.get(&index) {
+            crate::metrics::CACHE_HITS
+                .with_label_values(&["entry"])
+                .inc();
+            return Ok(Some(entry.value().as_ref().clone()));
+        }
+
+        crate::metrics::CACHE_MISSES
+            .with_label_values(&["entry"])
+            .inc();
+
         match self.get_deduplicated_entry(index).await? {
-            Some(dedup_entry) => Ok(Some(self.reconstruct_log_entry(&dedup_entry).await?)),
+            Some(dedup_entry) => {
+                let entry = self.reconstruct_log_entry(&dedup_entry).await?;
+
+                let entry_arc = Arc::new(entry.clone());
+                self.entry_cache.insert(index, entry_arc);
+
+                Ok(Some(entry))
+            }
             None => Ok(None),
         }
     }
