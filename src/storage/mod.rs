@@ -749,43 +749,26 @@ impl CtStorage {
         let (certificate, original_precert) = if dedup_entry.entry_type
             == crate::types::LogEntryType::PrecertEntry
         {
-            let storage_clone = self.clone();
             let cert_hash = dedup_entry.certificate_hash;
-            let precert_result =
-                tokio::spawn(async move { storage_clone.get_certificate(&cert_hash).await })
-                    .await
-                    .map_err(|e| StorageError::InvalidFormat(format!("Task join error: {}", e)))??
-                    .ok_or_else(|| {
-                        StorageError::InvalidFormat("Original precert not found".to_string())
-                    })?;
+            let precert_result = self.get_certificate(&cert_hash).await?.ok_or_else(|| {
+                StorageError::InvalidFormat("Original precert not found".to_string())
+            })?;
 
-            let chain_handles = dedup_entry.chain_hashes.as_ref().map(|hashes| {
+            let chain_futures = dedup_entry.chain_hashes.as_ref().map(|hashes| {
                 hashes
                     .iter()
-                    .map(|hash| {
-                        let storage_clone = self.clone();
-                        let hash_clone = *hash;
-                        tokio::spawn(
-                            async move { storage_clone.get_certificate(&hash_clone).await },
-                        )
-                    })
+                    .map(|hash| self.get_certificate(hash))
                     .collect::<Vec<_>>()
             });
 
-            let chain = match chain_handles {
-                Some(handles) => {
-                    let results = join_all(handles).await;
+            let chain = match chain_futures {
+                Some(futures) => {
+                    let results = join_all(futures).await;
                     let mut chain_certs = Vec::new();
                     for result in results {
-                        let cert = result
-                            .map_err(|e| {
-                                StorageError::InvalidFormat(format!("Task join error: {}", e))
-                            })??
-                            .ok_or_else(|| {
-                                StorageError::InvalidFormat(
-                                    "Chain certificate not found".to_string(),
-                                )
-                            })?;
+                        let cert = result?.ok_or_else(|| {
+                            StorageError::InvalidFormat("Chain certificate not found".to_string())
+                        })?;
                         chain_certs.push(cert);
                     }
                     chain_certs
@@ -800,42 +783,30 @@ impl CtStorage {
 
             (tbs_certificate, Some(precert_result))
         } else {
-            let storage_clone = self.clone();
             let cert_hash = dedup_entry.certificate_hash;
-            let main_cert_handle =
-                tokio::spawn(async move { storage_clone.get_certificate(&cert_hash).await });
-
-            let certificate = main_cert_handle
-                .await
-                .map_err(|e| StorageError::InvalidFormat(format!("Task join error: {}", e)))??
+            let certificate = self
+                .get_certificate(&cert_hash)
+                .await?
                 .ok_or_else(|| StorageError::InvalidFormat("Certificate not found".to_string()))?;
 
             (certificate, None)
         };
 
-        let chain_handles = dedup_entry.chain_hashes.as_ref().map(|hashes| {
+        let chain_futures = dedup_entry.chain_hashes.as_ref().map(|hashes| {
             hashes
                 .iter()
-                .map(|hash| {
-                    let storage_clone = self.clone();
-                    let hash_clone = *hash;
-                    tokio::spawn(async move { storage_clone.get_certificate(&hash_clone).await })
-                })
+                .map(|hash| self.get_certificate(hash))
                 .collect::<Vec<_>>()
         });
 
-        let chain = match chain_handles {
-            Some(handles) => {
-                let results = join_all(handles).await;
+        let chain = match chain_futures {
+            Some(futures) => {
+                let results = join_all(futures).await;
                 let mut chain_certs = Vec::new();
                 for result in results {
-                    let cert = result
-                        .map_err(|e| {
-                            StorageError::InvalidFormat(format!("Task join error: {}", e))
-                        })??
-                        .ok_or_else(|| {
-                            StorageError::InvalidFormat("Chain certificate not found".to_string())
-                        })?;
+                    let cert = result?.ok_or_else(|| {
+                        StorageError::InvalidFormat("Chain certificate not found".to_string())
+                    })?;
                     chain_certs.push(cert);
                 }
                 Some(chain_certs)

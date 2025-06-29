@@ -409,7 +409,11 @@ where
             // Calculate the range of tiles affected by this batch
             // A tile is affected if any of the new entries fall within its range
             let first_new_position = starting_index / subtree_size;
-            let last_new_position = (tree_size - 1) / subtree_size;
+            let last_new_position = if tree_size > 0 {
+                (tree_size - 1) / subtree_size
+            } else {
+                0
+            };
 
             let first_affected_tile = first_new_position / entries_per_tile;
             let last_affected_tile = last_new_position / entries_per_tile;
@@ -442,6 +446,14 @@ where
             }
 
             for (tile_index, start_position, end_position) in tiles_to_process {
+                let tile_key = Self::tile_key(level, tile_index);
+                if self.db.get(&tile_key).await?.is_some() {
+                    if let Some(ref cache) = self.tile_cache {
+                        cache.insert((level, tile_index), true).await;
+                    }
+                    continue;
+                }
+
                 let mut hash_futures = Vec::new();
 
                 for position in start_position..end_position {

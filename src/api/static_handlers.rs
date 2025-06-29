@@ -238,13 +238,13 @@ async fn generate_merkle_tile(
         end_position - start_position
     };
 
-    let tasks: Vec<_> = (0..max_hashes)
+    let futures: Vec<_> = (0..max_hashes)
         .map(|i| {
             let position = start_position + i;
             let start_leaf = position * subtree_size;
             let merkle_tree = state.merkle_tree.clone();
 
-            tokio::spawn(async move {
+            async move {
                 if start_leaf >= tree_size {
                     Ok(None)
                 } else {
@@ -259,35 +259,20 @@ async fn generate_merkle_tile(
                     hash_array.copy_from_slice(hash.as_slice());
                     Ok::<Option<[u8; 32]>, crate::types::CtError>(Some(hash_array))
                 }
-            })
+            }
         })
         .collect();
 
-    let results = futures::future::try_join_all(tasks).await.map_err(|e| {
+    let results = futures::future::try_join_all(futures).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(ErrorResponse {
-                error: format!("Task failed: {}", e),
+                error: format!("Failed to get node hash: {}", e),
             }),
         )
     })?;
 
-    let hashes: Vec<[u8; 32]> = results
-        .into_iter()
-        .map(|r| {
-            r.map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(ErrorResponse {
-                        error: format!("Failed to get node hash: {}", e),
-                    }),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+    let hashes: Vec<[u8; 32]> = results.into_iter().flatten().collect();
 
     if hashes.is_empty() {
         return Err((
@@ -416,12 +401,12 @@ async fn generate_data_tile(
         entries_per_tile
     };
 
-    let tasks: Vec<_> = (0..max_entries)
+    let futures: Vec<_> = (0..max_entries)
         .map(|i| {
             let entry_index = start_offset + i;
             let storage = state.storage.clone();
 
-            tokio::spawn(async move {
+            async move {
                 if entry_index >= tree_size {
                     Ok(None)
                 } else {
@@ -451,35 +436,20 @@ async fn generate_data_tile(
 
                     Ok::<Option<Vec<u8>>, crate::types::CtError>(Some(leaf_bytes))
                 }
-            })
+            }
         })
         .collect();
 
-    let results = futures::future::try_join_all(tasks).await.map_err(|e| {
+    let results = futures::future::try_join_all(futures).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(ErrorResponse {
-                error: format!("Task failed: {}", e),
+                error: format!("Failed to get entry data: {}", e),
             }),
         )
     })?;
 
-    let leaf_bytes_vec: Vec<Vec<u8>> = results
-        .into_iter()
-        .map(|r| {
-            r.map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(ErrorResponse {
-                        error: format!("Failed to get entry data: {}", e),
-                    }),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+    let leaf_bytes_vec: Vec<Vec<u8>> = results.into_iter().flatten().collect();
 
     if leaf_bytes_vec.is_empty() {
         return Err((

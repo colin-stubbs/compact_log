@@ -612,7 +612,7 @@ pub async fn get_entries(
     let futures: Vec<_> = (params.start..=end)
         .map(|i| {
             let storage = storage.clone();
-            tokio::spawn(async move { storage.get_entry(i).await })
+            async move { storage.get_entry(i).await }
         })
         .collect();
 
@@ -620,16 +620,7 @@ pub async fn get_entries(
 
     let mut entries = Vec::new();
 
-    for join_result in results.into_iter() {
-        let result = join_result.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Task join error: {}", e),
-                }),
-            )
-        })?;
-
+    for result in results.into_iter() {
         if let Some(log_entry) =
             result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())))?
         {
