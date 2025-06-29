@@ -14,6 +14,7 @@ codegen-units = 1
 slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "63b08992dd06b342b7b6589175c5c53d11d62951", features = [
     "lz4",
     "azure",
+    "foyer",
 ] }
 postcard = { version = "1.0", features = ["alloc", "use-std"] }
 tokio = { version = "1", features = ["full"] }
@@ -43,7 +44,7 @@ rand = "0.8"
 tikv-jemallocator = { version = "0.6.0", features = ["background_threads"] }
 subtle = "2.5"
 futures = "0.3"
-moka = { version = "0.12", features = ["future"] }
+foyer = "0.17"
 openssl = { version = "0.10", features = ["vendored"] }
 csv = "1.3"
 reqwest = { version = "0.12", features = ["rustls-tls", "json"] }

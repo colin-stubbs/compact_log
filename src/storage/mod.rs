@@ -340,7 +340,7 @@ impl CtStorage {
             start_time.elapsed()
         );
 
-        let entries_vec: Vec<BatchEntry> = entries.drain(..).collect();
+        let entries_vec: Vec<BatchEntry> = std::mem::take(entries);
         let entries_count = entries_vec.len();
 
         let (processed_data, completion_info) = tokio::task::spawn_blocking(move || {

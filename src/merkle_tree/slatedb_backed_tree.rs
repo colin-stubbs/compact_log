@@ -8,9 +8,9 @@ use crate::merkle_tree::{
 };
 use crate::storage::RateLimitedDb;
 use digest::Digest;
-use moka::future::Cache;
+use foyer::{Cache, CacheBuilder};
 use slatedb::WriteBatch;
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, sync::Arc};
 use tokio::sync::Mutex;
 
 #[derive(Debug)]
@@ -106,15 +106,9 @@ where
     }
 
     pub async fn new(db: RateLimitedDb) -> Result<Self, SlateDbTreeError> {
-        let node_cache = Cache::builder()
-            .max_capacity(100_000)
-            .time_to_live(Duration::from_secs(300))
-            .build();
+        let node_cache: Cache<(u64, u64), Vec<u8>> = CacheBuilder::new(100_000).build();
 
-        let tile_cache = Cache::builder()
-            .max_capacity(100_000)
-            .time_to_live(Duration::from_secs(300))
-            .build();
+        let tile_cache: Cache<(u8, u64), bool> = CacheBuilder::new(100_000).build();
 
         let tree = Self {
             db,
@@ -455,7 +449,7 @@ where
                 let tile_key = Self::tile_key(level, tile_index);
                 if self.db.get(&tile_key).await?.is_some() {
                     if let Some(ref cache) = self.tile_cache {
-                        cache.insert((level, tile_index), true).await;
+                        cache.insert((level, tile_index), true);
                     }
                     continue;
                 }
@@ -525,7 +519,7 @@ where
                         batch.put(key, &tile_bytes);
 
                         if let Some(ref cache) = self.tile_cache {
-                            cache.insert((level, tile_index), true).await;
+                            cache.insert((level, tile_index), true);
                         }
                     }
                 }
@@ -631,10 +625,11 @@ where
         version: u64,
     ) -> Result<digest::Output<H>, SlateDbTreeError> {
         if let Some(ref cache) = self.node_cache {
-            if let Some(cached_hash) = cache.get(&(idx, version)).await {
+            if let Some(entry) = cache.get(&(idx, version)) {
+                let cached_hash = entry.value();
                 let mut hash = digest::Output::<H>::default();
                 if cached_hash.len() == hash.len() {
-                    hash.copy_from_slice(&cached_hash);
+                    hash.copy_from_slice(cached_hash);
                     return Ok(hash);
                 }
             }
@@ -647,7 +642,7 @@ where
                 hash.copy_from_slice(&bytes);
 
                 if let Some(ref cache) = self.node_cache {
-                    cache.insert((idx, version), bytes.to_vec()).await;
+                    cache.insert((idx, version), bytes.to_vec());
                 }
 
                 return Ok(hash);
@@ -670,7 +665,7 @@ where
                     let default_hash = digest::Output::<H>::default();
 
                     if let Some(ref cache) = self.node_cache {
-                        cache.insert((idx, version), default_hash.to_vec()).await;
+                        cache.insert((idx, version), default_hash.to_vec());
                     }
 
                     Ok(default_hash)
@@ -685,7 +680,7 @@ where
 
                                 // Cache the result with the requested version (not latest_version)
                                 if let Some(ref cache) = self.node_cache {
-                                    cache.insert((idx, version), bytes.to_vec()).await;
+                                    cache.insert((idx, version), bytes.to_vec());
                                 }
 
                                 Ok(hash)
@@ -709,7 +704,7 @@ where
 
                 // Cache the default result
                 if let Some(ref cache) = self.node_cache {
-                    cache.insert((idx, version), default_hash.to_vec()).await;
+                    cache.insert((idx, version), default_hash.to_vec());
                 }
 
                 Ok(default_hash)

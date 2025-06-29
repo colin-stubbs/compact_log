@@ -7,7 +7,7 @@ use slatedb::config::{
     CompactorOptions, CompressionCodec, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
     ObjectStoreCacheOptions,
 };
-use slatedb::db_cache::moka::{MokaCache, MokaCacheOptions};
+use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 use slatedb::{
     object_store::{
         aws::AmazonS3Builder, azure::MicrosoftAzureBuilder, local::LocalFileSystem, path::Path,
@@ -410,13 +410,14 @@ async fn initialize_storage(
         .map(|c| c.memory_block_cache_capacity_mb)
         .unwrap_or(DEFAULT_MEMORY_BLOCK_CACHE_CAPACITY_MB);
 
-    let cache_options = MokaCacheOptions {
-        time_to_live: Some(Duration::from_secs(60 * 60 * 5)),
-        max_capacity: memory_block_cache_mb * 1024 * 1024, // Convert MB to bytes
-        ..default::Default::default()
+    // Convert MB to bytes for foyer cache capacity
+    let cache_capacity_bytes = memory_block_cache_mb * 1024 * 1024;
+
+    let foyer_options = FoyerCacheOptions {
+        max_capacity: cache_capacity_bytes,
     };
 
-    let block_cache = Arc::new(MokaCache::new_with_opts(cache_options));
+    let block_cache = Arc::new(FoyerCache::new_with_opts(foyer_options));
 
     let garbage_collector_directory_options = GarbageCollectorDirectoryOptions {
         min_age: Duration::from_secs(60 * 60 * 12),

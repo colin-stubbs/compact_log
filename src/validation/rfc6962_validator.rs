@@ -2,7 +2,7 @@ use crate::oids::*;
 use crate::types::{CtError, Result};
 use chrono::{DateTime, Utc};
 use der::{Decode, Encode};
-use moka::future::Cache;
+use foyer::{Cache, CacheBuilder};
 use openssl::x509::X509;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -116,10 +116,8 @@ impl Rfc6962Validator {
             .map(Self::certificate_hash)
             .collect::<Result<HashSet<_>>>()?;
 
-        let x509_cache = Cache::builder()
-            .max_capacity(10_000)
-            .time_to_live(std::time::Duration::from_secs(3600))
-            .build();
+        let x509_cache: Cache<[u8; 32], Arc<openssl::x509::X509>> =
+            CacheBuilder::new(10_000).build();
 
         Ok(Self {
             config,
@@ -354,8 +352,8 @@ impl Rfc6962Validator {
         hasher.update(&cert_der);
         let der_hash: [u8; 32] = hasher.finalize().into();
 
-        if let Some(cached) = self.x509_cache.get(&der_hash).await {
-            return Ok(cached);
+        if let Some(entry) = self.x509_cache.get(&der_hash) {
+            return Ok(entry.value().clone());
         }
 
         let x509 = X509::from_der(&cert_der)
@@ -365,7 +363,7 @@ impl Rfc6962Validator {
         // Only cache CA certificates (intermediates and roots)
         let is_ca = self.is_ca_certificate(cert);
         if is_ca {
-            self.x509_cache.insert(der_hash, x509_arc.clone()).await;
+            self.x509_cache.insert(der_hash, x509_arc.clone());
         }
 
         Ok(x509_arc)
