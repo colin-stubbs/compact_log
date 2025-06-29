@@ -144,8 +144,10 @@ impl CtStorage {
         // Start metrics logging task
         let metrics_sender = batch_sender.clone();
         let metrics_stats = batch_stats.clone();
+        let metrics_db = db.clone();
+
         tokio::spawn(async move {
-            Self::metrics_worker(metrics_sender, metrics_stats).await;
+            Self::metrics_worker(metrics_sender, metrics_stats, metrics_db).await;
         });
 
         let chain_cache = CacheBuilder::new(10_000).build();
@@ -954,11 +956,14 @@ impl CtStorage {
     async fn metrics_worker(
         batch_sender: mpsc::Sender<BatchEntry>,
         batch_stats: Arc<Mutex<BatchStats>>,
+        db: RateLimitedDb,
     ) {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let mut last_stats = BatchStats::default();
+        let mut last_read_ops = 0u64;
+        let mut last_read_bytes = 0u64;
 
         loop {
             interval.tick().await;
@@ -1028,6 +1033,26 @@ impl CtStorage {
                     max_capacity
                 );
             }
+
+            let (current_read_ops, current_read_bytes) = db.get_read_stats();
+            let read_ops_delta = current_read_ops.saturating_sub(last_read_ops);
+            let read_bytes_delta = current_read_bytes.saturating_sub(last_read_bytes);
+
+            if read_ops_delta > 0 {
+                let read_ops_per_sec = read_ops_delta / 5;
+                let read_mb_per_sec = read_bytes_delta / 5 / 1_000_000;
+                let avg_read_size = read_bytes_delta / read_ops_delta;
+
+                tracing::info!(
+                    "Read stats: {} ops/s, {} MB/s, avg size: {} KB",
+                    read_ops_per_sec,
+                    read_mb_per_sec,
+                    avg_read_size / 1024
+                );
+            }
+
+            last_read_ops = current_read_ops;
+            last_read_bytes = current_read_bytes;
 
             // Clone current stats for next interval
             last_stats = BatchStats {
