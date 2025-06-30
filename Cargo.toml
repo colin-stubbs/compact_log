@@ -16,7 +16,7 @@ slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "63b08992dd06b34
     "azure",
     "foyer",
 ] }
-postcard = { version = "1.0", features = ["alloc", "use-std"] }
+postcard = { version = "1.1", features = ["alloc", "use-std"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["compression-full"] }
