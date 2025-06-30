@@ -465,7 +465,7 @@ async fn initialize_storage(
             max_backoff: Duration::from_secs(1),
             base: 2.0,
         },
-        max_retries: 10,
+        max_retries: usize::MAX,
         retry_timeout: Duration::from_secs(20),
     };
 
