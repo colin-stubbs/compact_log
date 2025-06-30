@@ -1,6 +1,6 @@
 use crate::rate_limiter::{ReadPermit, ReadRateLimiter};
 use bytes::Bytes;
-use slatedb::{Db, WriteBatch};
+use slatedb::{config::WriteOptions, Db, WriteBatch};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -51,7 +51,11 @@ impl RateLimitedDb {
 
     /// Write a batch of operations (not rate limited)
     pub async fn write_batch(&self, batch: WriteBatch) -> Result<(), slatedb::SlateDBError> {
-        self.db.write(batch).await
+        let write_options = WriteOptions {
+            await_durable: false,
+        };
+        self.db.write_with_options(batch, &write_options).await?;
+        self.db.flush().await
     }
 
     pub fn get_read_stats(&self) -> (u64, u64) {
