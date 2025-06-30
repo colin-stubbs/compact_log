@@ -425,7 +425,7 @@ async fn initialize_storage(
     };
 
     let db_options = Settings {
-        compression_codec: Some(CompressionCodec::Lz4),
+        compression_codec: Some(CompressionCodec::Zstd),
         garbage_collector_options: Some(GarbageCollectorOptions {
             wal_options: Some(garbage_collector_directory_options),
             manifest_options: Some(garbage_collector_directory_options),
@@ -516,6 +516,7 @@ async fn initialize_storage(
     let db = Db::builder(path.clone(), blob_store.clone())
         .with_settings(db_options)
         .with_block_cache(block_cache)
+        .with_sst_block_size(slatedb::SstBlockSize::Block64Kib)
         .build()
         .await
         .expect("failed to open db");
