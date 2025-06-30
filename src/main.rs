@@ -202,7 +202,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 },
                 None => {
-                    return Err("CCADB environment must be specified when validation is enabled".into());
+                    return Err(
+                        "CCADB environment must be specified when validation is enabled".into(),
+                    );
                 }
             };
 

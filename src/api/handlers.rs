@@ -333,12 +333,16 @@ pub async fn add_pre_chain(
                 )
             })?
     } else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Precertificate validation requires a configured validator".to_string(),
-            }),
-        ));
+        crate::validation::extract_issuer_key_hash_minimal(&complete_chain)
+            .map(|hash| hash.to_vec())
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?
     };
 
     let tbs_certificate = TbsExtractor::extract_tbs_certificate(&precert_der, &processed_chain)
