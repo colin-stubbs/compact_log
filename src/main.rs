@@ -1,4 +1,5 @@
 use config::Config;
+use object_store::{BackoffConfig, RetryConfig};
 use p256::pkcs8::LineEnding;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use p256::SecretKey;
@@ -458,6 +459,16 @@ async fn initialize_storage(
         ..Default::default()
     };
 
+    let retry_config = RetryConfig {
+        backoff: BackoffConfig {
+            init_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_secs(1),
+            base: 2.0,
+        },
+        max_retries: 10,
+        retry_timeout: Duration::from_secs(20),
+    };
+
     let path = Path::from("ct_log");
     let blob_store: Arc<dyn ObjectStore> = match storage_config.provider.as_str() {
         "azure" => {
@@ -465,11 +476,13 @@ async fn initialize_storage(
                 .azure
                 .as_ref()
                 .ok_or("Azure configuration is required when provider is 'azure'")?;
+
             Arc::new(
                 MicrosoftAzureBuilder::new()
                     .with_account(&azure_config.account)
                     .with_access_key(&azure_config.access_key)
                     .with_container_name(&azure_config.container_name)
+                    .with_retry(retry_config)
                     .build()?,
             )
         }
@@ -478,12 +491,14 @@ async fn initialize_storage(
                 .aws
                 .as_ref()
                 .ok_or("AWS configuration is required when provider is 'aws'")?;
+
             Arc::new(
                 AmazonS3Builder::new()
                     .with_region(&aws_config.region)
                     .with_bucket_name(&aws_config.bucket)
                     .with_access_key_id(&aws_config.access_key_id)
                     .with_secret_access_key(&aws_config.secret_access_key)
+                    .with_retry(retry_config)
                     .build()?,
             )
         }
