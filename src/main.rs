@@ -102,7 +102,7 @@ const DEFAULT_MEMORY_BLOCK_CACHE_CAPACITY_MB: u64 = 64; // 64 MB default
 #[derive(Debug, Deserialize, Serialize)]
 struct ValidationConfig {
     enabled: bool,
-    ccadb: String, // "Production" or "Test"
+    ccadb: Option<String>, // "Production" or "Test"
     #[serde(default = "default_trusted_roots_dir")]
     trusted_roots_dir: String,
     temporal_window_start: Option<String>,
@@ -189,15 +189,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             (None, None)
         } else {
             // Parse the CCADB environment
-            let ccadb_env = match validation_config.ccadb.to_lowercase().as_str() {
-                "production" => CcadbEnvironment::Production,
-                "test" => CcadbEnvironment::Test,
-                _ => {
-                    return Err(format!(
-                        "Invalid CCADB environment '{}'. Must be 'Production' or 'Test'",
-                        validation_config.ccadb
-                    )
-                    .into());
+            let ccadb_env = match validation_config.ccadb.as_ref() {
+                Some(ccadb) => match ccadb.to_lowercase().as_str() {
+                    "production" => CcadbEnvironment::Production,
+                    "test" => CcadbEnvironment::Test,
+                    _ => {
+                        return Err(format!(
+                            "Invalid CCADB environment '{}'. Must be 'Production' or 'Test'",
+                            ccadb
+                        )
+                        .into());
+                    }
+                },
+                None => {
+                    return Err("CCADB environment must be specified when validation is enabled".into());
                 }
             };
 
@@ -342,7 +347,7 @@ async fn initialize_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         cache: None,
         validation: Some(ValidationConfig {
             enabled: true,
-            ccadb: "Production".to_string(),
+            ccadb: Some("Production".to_string()),
             trusted_roots_dir: "trusted_roots".to_string(),
             temporal_window_start: None,
             temporal_window_end: None,
