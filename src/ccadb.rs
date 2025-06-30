@@ -346,7 +346,7 @@ impl CcadbWorker {
         let url = self.environment.url();
         let response = reqwest::get(url)
             .await
-            .map_err(|e| CtError::Internal(format!("Failed to fetch CCADB data: {}", e)))?;
+            .map_err(|e| CtError::Internal(format!("Failed to fetch CCADB data: {:?}", e)))?;
 
         if !response.status().is_success() {
             return Err(CtError::Internal(format!(
@@ -358,7 +358,7 @@ impl CcadbWorker {
         let csv_data = response
             .text()
             .await
-            .map_err(|e| CtError::Internal(format!("Failed to read CCADB response: {}", e)))?;
+            .map_err(|e| CtError::Internal(format!("Failed to read CCADB response: {:?}", e)))?;
 
         self.store.add_from_ccadb_csv(&csv_data).await?;
 
