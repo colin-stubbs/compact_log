@@ -23,6 +23,30 @@ use x509_cert::der::Decode;
 
 type ApiResult<T> = std::result::Result<Json<T>, (StatusCode, Json<ErrorResponse>)>;
 
+async fn handle_storage_error(
+    e: crate::storage::StorageError,
+) -> (StatusCode, Json<ErrorResponse>) {
+    match e {
+        crate::storage::StorageError::QueueFull => {
+            let delay_ms = {
+                use rand::Rng;
+                rand::thread_rng().gen_range(500..=2000)
+            };
+
+            tracing::debug!("Queue full, delaying response by {}ms", delay_ms);
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "Service temporarily unavailable - system at capacity".to_string(),
+                }),
+            )
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())),
+    }
+}
+
 pub async fn add_chain(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<AddChainRequest>,
@@ -173,7 +197,7 @@ pub async fn add_chain(
     let sct_builder = state.sct_builder.clone();
     let cert_der_for_sct = cert_der.clone();
 
-    let (_assigned_index, sct) = state
+    let (_assigned_index, sct) = match state
         .storage
         .add_entry_batched(log_entry, cert_hash, move |index| {
             sct_builder
@@ -187,15 +211,10 @@ pub async fn add_chain(
                 .expect("Failed to create SCT")
         })
         .await
-        .map_err(|e| match e {
-            crate::storage::StorageError::QueueFull => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorResponse {
-                    error: "Service temporarily unavailable - system at capacity".to_string(),
-                }),
-            ),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())),
-        })?;
+    {
+        Ok(result) => result,
+        Err(e) => return Err(handle_storage_error(e).await),
+    };
 
     crate::metrics::CERTIFICATE_SUBMISSIONS_TOTAL
         .with_label_values(&["x509", "success"])
@@ -374,7 +393,7 @@ pub async fn add_pre_chain(
     let tbs_cert_for_sct = tbs_certificate.clone();
     let issuer_key_hash_for_sct = issuer_key_hash.clone();
 
-    let (_assigned_index, sct) = state
+    let (_assigned_index, sct) = match state
         .storage
         .add_entry_batched(log_entry, cert_hash, move |index| {
             sct_builder
@@ -388,15 +407,10 @@ pub async fn add_pre_chain(
                 .expect("Failed to create SCT")
         })
         .await
-        .map_err(|e| match e {
-            crate::storage::StorageError::QueueFull => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorResponse {
-                    error: "Service temporarily unavailable - system at capacity".to_string(),
-                }),
-            ),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(e.into())),
-        })?;
+    {
+        Ok(result) => result,
+        Err(e) => return Err(handle_storage_error(e).await),
+    };
 
     let response = AddChainResponse {
         sct_version: sct.version as u8,
