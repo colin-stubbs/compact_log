@@ -433,6 +433,7 @@ async fn initialize_storage(
     };
 
     let db_options = Settings {
+        l0_sst_size_bytes: Settings::default().l0_sst_size_bytes * 2, // Due to compression
         compression_codec: Some(CompressionCodec::Lz4),
         garbage_collector_options: Some(GarbageCollectorOptions {
             wal_options: Some(garbage_collector_directory_options),
@@ -440,6 +441,7 @@ async fn initialize_storage(
             compacted_options: Some(garbage_collector_directory_options),
         }),
         compactor_options: Some(CompactorOptions {
+            max_sst_size: CompactorOptions::default().max_sst_size * 2, // Due to compression
             max_concurrent_compactions: 32,
             ..default::Default::default()
         }),
