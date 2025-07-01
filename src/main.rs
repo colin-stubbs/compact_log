@@ -16,6 +16,7 @@ use slatedb::{
     },
     Db, Settings,
 };
+use tokio::runtime::{Handle, Runtime};
 
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
@@ -145,8 +146,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bind_addr = &config.server.bind_addr;
 
-    let (storage, _db_path, _object_store) =
-        initialize_storage(&config.storage, &config.cache).await?;
+    let background_runtime = Runtime::new().unwrap();
+
+    let (storage, _db_path, _object_store) = initialize_storage(
+        &config.storage,
+        &config.cache,
+        background_runtime.handle().clone(),
+    )
+    .await?;
 
     // Load keys from config
     let private_key = load_private_key(&config.keys.private_key_path)?;
@@ -403,6 +410,7 @@ fn load_private_key(path: &str) -> Result<SecretKey, Box<dyn std::error::Error>>
 async fn initialize_storage(
     storage_config: &StorageConfig,
     cache_config: &Option<CacheConfig>,
+    background_runtime: Handle,
 ) -> Result<(Arc<Db>, Path, Arc<dyn ObjectStore>), Box<dyn std::error::Error>> {
     // Memory block cache can be configured independently of local file cache
     let memory_block_cache_mb = cache_config
@@ -433,7 +441,6 @@ async fn initialize_storage(
         }),
         compactor_options: Some(CompactorOptions {
             max_concurrent_compactions: 32,
-            max_sst_size: 128 * 1024 * 1024, // 128 MB
             ..default::Default::default()
         }),
         object_store_cache_options: match cache_config {
@@ -517,9 +524,11 @@ async fn initialize_storage(
         .with_settings(db_options)
         .with_block_cache(block_cache)
         .with_sst_block_size(slatedb::SstBlockSize::Block64Kib)
+        .with_compaction_runtime(background_runtime.clone())
+        .with_gc_runtime(background_runtime)
         .build()
         .await
-        .expect("failed to open db");
+        .map_err(|e| format!("Failed to open database: {}", e))?;
 
     Ok((Arc::new(db), path, blob_store))
 }
