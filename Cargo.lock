@@ -1993,6 +1993,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4_flex"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ab2867e3eeeca90e844d1940eab391c9dc5228783db2ed999acbc0a9ed375a"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "madsim"
 version = "0.2.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3410,6 +3419,7 @@ dependencies = [
  "foyer",
  "futures",
  "log",
+ "lz4_flex",
  "moka",
  "object_store",
  "once_cell",
@@ -3430,7 +3440,6 @@ dependencies = [
  "ulid",
  "uuid",
  "walkdir",
- "zstd",
 ]
 
 [[package]]

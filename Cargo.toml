@@ -12,7 +12,7 @@ codegen-units = 1
 
 [dependencies]
 slatedb = { git = "https://github.com/Barre/slatedb.git", rev = "5aaa4c8e879f82b19251a0b473666e241433334c", features = [
-    "zstd",
+    "lz4",
     "azure",
     "foyer",
 ] }
