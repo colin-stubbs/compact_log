@@ -4,16 +4,15 @@
 
 **⚠️ This is a work in progress. While the CT functionality works, this should not be yet used in production.**
 
+## Background
+
+CompactLog demonstrates that the same Merkle tree can be efficiently served through both RFC 6962 and Static CT APIs from a single implementation. This challenges the narrative that RFC 6962 is fundamentally unscalable or that separate architectures are necessary.
+
+For our analysis of the broader Certificate Transparency ecosystem and the push toward Static CT, see [why Static CT is considered harmful](https://www.merklemap.com/documentation/static-ct).
+
 # CompactLog
 
 A dual-API Certificate Transparency (CT) log implementation. CompactLog serves the same Merkle tree through both the RFC 6962 Certificate Transparency API and the Static CT API (C2SP draft), built on SlateDB to explore how LSM-tree storage can address traditional CT log scalability challenges.
-
-## Live Instance
-
-CompactLog is running in production with live endpoints available:
-
-- **RFC 6962 API**: https://compact-log.ct.merklemap.com/ct/v1/get-sth
-- **Static CT API**: https://compact-log.ct.merklemap.com/checkpoint
 
 ### Live Monitoring
 
