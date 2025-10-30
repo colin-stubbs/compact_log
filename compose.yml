@@ -1,0 +1,37 @@
+services:
+  compactlog:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: colinstubbs/compact_log:latest
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    environment:
+      # Optional: Timezone
+      #- TZ=${TZ:-UTC}
+      # Optional, entrypoint debugging
+      #- DEBUG=${DEBUG:-false}
+      # Optional, rust debugging
+      #- RUST_LOG=${RUST_LOG:-}
+      - LOAD_TEST_DATA=${LOAD_TEST_DATA:-false}
+      - GEN_TEST_CERTS=${GEN_TEST_CERTS:-}
+      - COMPACTLOG_BIND_ADDRESS=${COMPACTLOG_BIND_ADDRESS:-0.0.0.0}
+      - COMPACTLOG_BIND_PORT=${COMPACTLOG_BIND_PORT:-8080}
+      - COMPACTLOG_LOG_MONITORING_URL=${COMPACTLOG_LOG_MONITORING_URL:-http://localhost/}
+      - COMPACTLOG_LOG_SUBMISSION_URL=${COMPACTLOG_LOG_SUBMISSION_URL:-http://localhost/}
+    ports:
+      - "80:80"
+    #volumes:
+      #- ./testdata:/compactlog/testdata
+      # Optional examples of volume based injection that might be what you need.
+      #- ./Config.toml:/compactlog/Config.toml
+      #- ./ct:/tmp/ct-log-storage
+      #- ./keys:/compactlog/keys/
+      #- ./trusted_roots:/compactlog/trusted_roots/
+    healthcheck:
+      # healthcheck probes compactlog and checks for the valid response to /ct/v1/get-sth
+      test: curl --silent --fail http://localhost/ct/v1/get-sth | grep '"tree_size":' || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
