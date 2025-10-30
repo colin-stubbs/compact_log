@@ -30,7 +30,7 @@ services:
       #- ./trusted_roots:/compactlog/trusted_roots/
     healthcheck:
       # healthcheck probes compactlog and checks for the valid response to /ct/v1/get-sth
-      test: curl --silent --fail http://localhost/ct/v1/get-sth | grep '"tree_size":' || exit 1
+      test: curl --silent --fail http://localhost:${CADDY_LISTEN_PORT:-80}/ct/v1/get-sth | grep '"tree_size":' || exit 1
       interval: 30s
       timeout: 10s
       retries: 3

@@ -17,8 +17,8 @@ COMPACTLOG_TRUSTED_ROOTS_PATH=${COMPACTLOG_TRUSTED_ROOTS_PATH:-/compactlog/trust
 COMPACTLOG_BIND_ADDRESS=${COMPACTLOG_BIND_ADDRESS:-0.0.0.0}
 COMPACTLOG_BIND_PORT=${COMPACTLOG_BIND_PORT:-8080}
 COMPACTLOG_LOG_NAME=${COMPACTLOG_LOG_NAME:-compactlog}
-COMPACTLOG_LOG_MONITORING_URL=${COMPACTLOG_LOG_MONITORING_URL:-}
-COMPACTLOG_LOG_SUBMISSION_URL=${COMPACTLOG_LOG_SUBMISSION_URL:-}
+COMPACTLOG_LOG_MONITORING_URL=${COMPACTLOG_LOG_MONITORING_URL:-http://localhost/}
+COMPACTLOG_LOG_SUBMISSION_URL=${COMPACTLOG_LOG_SUBMISSION_URL:-http://localhost/}
 
 CADDY_LISTEN_PORT=${CADDY_LISTEN_PORT:-80}
 CADDY_LISTEN_ADDRESS=${CADDY_LISTEN_ADDRESS:-0.0.0.0}
@@ -215,9 +215,9 @@ MONITOR_COMBINED_JSON='{
   ]
 }'
 
-echo "${MONITOR_RFC_JSON}" > /compactlog/monitor_json/monitor-rfc6962.json
-echo "${MONITOR_STATIC_JSON}" > /compactlog/monitor_json/monitor-static.json
-echo "${MONITOR_COMBINED_JSON}" > /compactlog/monitor_json/monitor-combined.json
+test -f /compactlog/monitor_json/monitor-rfc6962.json || echo "${MONITOR_RFC_JSON}" > /compactlog/monitor_json/monitor-rfc6962.json
+test -f /compactlog/monitor_json/monitor-static.json || echo "${MONITOR_STATIC_JSON}" > /compactlog/monitor_json/monitor-static.json
+test -f /compactlog/monitor_json/monitor-combined.json || echo "${MONITOR_COMBINED_JSON}" > /compactlog/monitor_json/monitor-combined.json
 
 test -f ${CADDY_CONFIG_FILE} || echo "{
   log default {
