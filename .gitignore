@@ -4,3 +4,4 @@ target
 trusted_roots/*.pem
 benchmark/certs
 .env
+testdata/
