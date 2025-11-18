@@ -11,6 +11,6 @@ USER root:root
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=5s CMD curl -f http://127.0.0.1:${COMPACTLOG_BIND_PORT:-8080}/ct/v1/get-sth | grep '"tree_size":' || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=30s CMD curl -f http://127.0.0.1:${COMPACTLOG_BIND_PORT:-8080}/ct/v1/get-sth | grep '"tree_size":' || exit 1
 
 ENTRYPOINT ["/compactlog/entrypoint.sh"]
