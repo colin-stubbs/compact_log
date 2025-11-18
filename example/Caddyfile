@@ -12,13 +12,6 @@
 }
 
 :80 {
-  @blocked {
-    path /int/*
-  }
-  handle @blocked {
-    respond "Access denied" 403
-  }
-
   rate_limit {
     zone default {
       key    {remote_host}

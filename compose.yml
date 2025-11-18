@@ -42,19 +42,15 @@ services:
       # persistent logs if desired
       #- logs:/var/log/compactlog
 
-  # caddy is used to front the Itko components and serve static tiles and other file based content.
-  # It also performs rate limiting. 10 requests per second by default, good to have to for realistic dev/testing purposes
-  # It also blocks access to the /int/ path. Because reasons but mostly examples.
+  # caddy is used to front compactlog primarily to perform rate limiting.
   caddy:
-    build:
-      context: ./example/caddy/
     image: colinstubbs/caddy:latest
     restart: unless-stopped
     ports:
       - "80:80"
     volumes:
       - ctlog_data:/usr/share/caddy
-      - ./example/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - ./example/Caddyfile:/etc/caddy/Caddyfile
       # persistent logs if desired
       #- logs:/var/log/caddy
     depends_on:
