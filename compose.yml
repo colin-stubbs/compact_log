@@ -3,35 +3,64 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: colinstubbs/compact_log:latest
+    image: colinstubbs/compactlog:latest
     restart: unless-stopped
-    entrypoint: ["/usr/local/bin/entrypoint.sh"]
     environment:
       # Optional: Timezone
       #- TZ=${TZ:-UTC}
-      # Optional, entrypoint debugging
+      # Optional, entrypoint debugging.
+      # NOTE: if set, even to an empty value, compactlog will spew debug level output.
       #- DEBUG=${DEBUG:-false}
-      # Optional, rust debugging
-      #- RUST_LOG=${RUST_LOG:-}
+      # set to true to load test certs from testdata/
       - LOAD_TEST_DATA=${LOAD_TEST_DATA:-false}
+      # set to 1+ to load generated certificates from testdata/generated/compact.chains.ndjson if it exists, requires LOAD_TEST_DATA to be true.
+      - LOAD_GENERATED_CERTS=${LOAD_GENERATED_CERTS:-}
+      # set to 1+ to auto-generate certificates, NOTE: this is dependent upon LOAD_TEST_DATA being true and will not occur if LOAD_TEST_DATA is false.
       - GEN_TEST_CERTS=${GEN_TEST_CERTS:-}
+      # Location for generated certs are stored in an NDJSON file. Can be relative if the container will generate it itself using the generate.sh script and LOAD_TEST_DATA is true and GEN_TEST_CERTS is set to 1+.
+      # An NDJSON file is used to support very large numbers of certs/chains, e.g 1,000,000+ without the performance impact and inode related limitations that may be present for most file systems.
+      # If you've already generated it once (which is recommended as 1,000,000+ certs will take a long time), and want it in a non-default location (for example via volume file mount) simply adjust this variable
+      # NOTE: LOAD_TEST_DATA must still be true, and LOAD_GENERATED_CERTS must still be set to 1+ to add any cert chains from this file to the CT log.
+      # NOTE: You only need to load test data like this ONCE provided you establish persistent storage for ${ITKO_ROOT_DIRECTORY}. If you're dealing with a large number of certs/chains you will only want to load once.
+      - CERT_CHAINS_NDJSON=${CERT_CHAINS_NDJSON:-compact.chains.ndjson}
+      # Compactlog configuration, refer to entrypoint.sh
+      - COMPACTLOG_ROOT_DIRECTORY=${COMPACTLOG_ROOT_DIRECTORY:-/tmp/ct-log-storage}
+      - COMPACTLOG_TRUSTED_ROOTS_PATH=${COMPACTLOG_TRUSTED_ROOTS_PATH:-/compactlog/trusted_roots/}
       - COMPACTLOG_BIND_ADDRESS=${COMPACTLOG_BIND_ADDRESS:-0.0.0.0}
       - COMPACTLOG_BIND_PORT=${COMPACTLOG_BIND_PORT:-8080}
       - COMPACTLOG_LOG_MONITORING_URL=${COMPACTLOG_LOG_MONITORING_URL:-http://localhost/}
       - COMPACTLOG_LOG_SUBMISSION_URL=${COMPACTLOG_LOG_SUBMISSION_URL:-http://localhost/}
     ports:
-      - "80:80"
-    #volumes:
-      #- ./testdata:/compactlog/testdata
+      - "8080:8080"
+    volumes:
+      - ctlog_data:/tmp/ct-log-storage
       # Optional examples of volume based injection that might be what you need.
       #- ./Config.toml:/compactlog/Config.toml
       #- ./ct:/tmp/ct-log-storage
       #- ./keys:/compactlog/keys/
       #- ./trusted_roots:/compactlog/trusted_roots/
-    healthcheck:
-      # healthcheck probes compactlog and checks for the valid response to /ct/v1/get-sth
-      test: curl --silent --fail http://localhost:${CADDY_LISTEN_PORT:-80}/ct/v1/get-sth | grep '"tree_size":' || exit 1
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      # persistent logs if desired
+      #- logs:/var/log/compactlog
 
+  # caddy is used to front the Itko components and serve static tiles and other file based content.
+  # It also performs rate limiting. 10 requests per second by default, good to have to for realistic dev/testing purposes
+  # It also blocks access to the /int/ path. Because reasons but mostly examples.
+  caddy:
+    build:
+      context: ./example/caddy/
+    image: colinstubbs/caddy:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ctlog_data:/usr/share/caddy
+      - ./example/caddy/Caddyfile:/etc/caddy/Caddyfile
+      # persistent logs if desired
+      #- logs:/var/log/caddy
+    depends_on:
+      compactlog:
+        condition: service_healthy
+
+volumes:
+  ctlog_data:
+  # logs:
