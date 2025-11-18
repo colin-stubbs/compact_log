@@ -9,7 +9,7 @@ services:
       # Optional: Timezone
       #- TZ=${TZ:-UTC}
       # Optional, entrypoint debugging.
-      # NOTE: if set, even to an empty value, compactlog will spew debug level output.
+      # NOTE: if set this will set RUST_LOG=debug in entrypoint.sh so you'll get compactlog debug level logging output.
       #- DEBUG=${DEBUG:-false}
       # set to true to load test certs from testdata/
       - LOAD_TEST_DATA=${LOAD_TEST_DATA:-false}
