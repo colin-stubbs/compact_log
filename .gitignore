@@ -1,7 +1,7 @@
 Config.toml
 keys
 target
-trusted_roots/*.pem
+trusted_roots/
 benchmark/certs
 .env
 testdata/

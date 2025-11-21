@@ -148,10 +148,4 @@ echo "${MONITOR_RFC_JSON}" > "${COMPACTLOG_ROOT_DIRECTORY}/monitor-rfc6962.json"
 echo "${MONITOR_STATIC_JSON}" > "${COMPACTLOG_ROOT_DIRECTORY}/monitor-static.json"
 echo "${MONITOR_COMBINED_JSON}" > "${COMPACTLOG_ROOT_DIRECTORY}/monitor-combined.json"
 
-# run testdata/insert.sh script - this runs in the background and *should* perform a loop waiting until compactlog has started before doing *things*.
-export CTLOG_NAME=compactlog
-export CTLOG_SUBMISSION_BASE_URL=http://127.0.0.1:${COMPACTLOG_BIND_PORT}/ct/v1
-cd /compactlog/testdata
-test -f /compactlog/testdata/insert.sh && /compactlog/testdata/insert.sh
-
 # EOF

@@ -11,31 +11,63 @@
   default_bind 0.0.0.0
 }
 
-:80 {
-  rate_limit {
-    zone default {
-      key    {remote_host}
-      events 10
-      window 5s
-    }
-    log_key
-  }
+(identified-rate) {
+	rate_limit {
+		zone default {
+			key {remote_host}
+			events 375
+			window 5s
+		}
+		log_key
+	}
+}
 
-  reverse_proxy /ct/* http://compactlog:8080
-  reverse_proxy /checkpoint http://compactlog:8080
-  reverse_proxy /tile/* http://compactlog:8080
-  reverse_proxy /issuer/* http://compactlog:8080
+(anonymous-rate) {
+	rate_limit {
+		zone default {
+			key {remote_host}
+			events 10
+			window 5s
+		}
+		log_key
+	}
+}
+
+(logging) {
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 10mb
+			roll_keep 5
+			roll_keep_for 1h
+		}
+	}
+}
+
+(compactlog) {
+  reverse_proxy "/ct/*" http://compactlog:8080
+  reverse_proxy "/checkpoint" http://compactlog:8080
+  reverse_proxy "/tile/*" http://compactlog:8080
+  reverse_proxy "/issuer/*" http://compactlog:8080
 
   route /monitor-*.json {
     header Content-Type application/json
   }
   root * /usr/share/caddy
   file_server
-  log {
-    output file /var/log/caddy/access.log {
-      roll_size 10mb
-      roll_keep 5
-      roll_keep_for 1h
-    }
-  }
+}
+
+:80 {
+	@identified header_regexp User-Agent ^.+@.+\..+$
+
+	handle @identified {
+		import identified-rate
+		import compactlog
+	}
+
+	handle {
+		import anonymous-rate
+		import compactlog
+	}
+
+	import logging
 }

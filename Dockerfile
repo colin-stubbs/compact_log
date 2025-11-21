@@ -1,11 +1,18 @@
 FROM rust:1-bullseye
 
-COPY . /compactlog
+RUN apt update && \
+  apt install -y jq git && \
+  apt clean all && \
+  rm -rf /var/lib/apt/lists/* && \
+  mkdir -p /tmp/ct-log-storage && \
+  git clone https://github.com/Barre/compact_log.git /compactlog
 
 WORKDIR /compactlog
 
-RUN mkdir -p /tmp/ct-log-storage && \
-  cargo build --locked --release
+RUN cargo build --locked --release
+
+COPY ./entrypoint.sh /compactlog/entrypoint.sh
+COPY ./post_start.sh /compactlog/post_start.sh
 
 USER root:root
 
